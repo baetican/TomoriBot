@@ -36,7 +36,7 @@ export async function buildParticipantContextItem(params: {
   snapshot?: import("@/types/misc/context").RequestSnapshot;
   convertMentions: MentionConverter;
   profileEnricherRegistry?: ParticipantProfileEnricherRegistry;
-}): Promise<StructuredContextItem | null> {
+}): Promise<{ item: StructuredContextItem | null; personalMemoryTexts: readonly string[] }> {
   const typedKeys = new Set<string>();
   for (const seed of params.participantSeeds) {
     const serializedKey = serializeParticipantKey(seed.key);
@@ -46,7 +46,7 @@ export async function buildParticipantContextItem(params: {
     typedKeys.add(serializedKey);
   }
   if (params.participantSeeds.length === 0) {
-    return null;
+    return { item: null, personalMemoryTexts: [] };
   }
 
   const hydrated = await hydrateParticipantProfiles({
@@ -95,22 +95,25 @@ export async function buildParticipantContextItem(params: {
   });
 
   return {
-    role: "user",
-    parts: [
-      {
-        type: "text",
-        text: await params.convertMentions(
-          rendered.text,
-          params.client,
-          params.guildId,
-          params.triggererName,
-          params.botName,
-          params.tomoriConfig.personal_memories_enabled,
-        ),
-      },
-    ],
-    metadataTag: ContextItemTag.KNOWLEDGE_USERS_IN_CONVERSATION,
-    conversationUsers: rendered.conversationUsers,
-    participantTargetIndex: rendered.targetIndex,
+    item: {
+      role: "user",
+      parts: [
+        {
+          type: "text",
+          text: await params.convertMentions(
+            rendered.text,
+            params.client,
+            params.guildId,
+            params.triggererName,
+            params.botName,
+            params.tomoriConfig.personal_memories_enabled,
+          ),
+        },
+      ],
+      metadataTag: ContextItemTag.KNOWLEDGE_USERS_IN_CONVERSATION,
+      conversationUsers: rendered.conversationUsers,
+      participantTargetIndex: rendered.targetIndex,
+    },
+    personalMemoryTexts: hydrated.personalMemoryTexts,
   };
 }

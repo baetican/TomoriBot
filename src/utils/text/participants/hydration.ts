@@ -99,6 +99,8 @@ export interface ParticipantExposurePolicy {
 export interface ParticipantHydrationResult {
   profiles: readonly HydratedParticipantProfile[];
   personaTaskLines: readonly string[];
+  /** Rendered personal-memory lines across all profiles, reused as RAG memory-lane query text. */
+  personalMemoryTexts: readonly string[];
   diagnostics: ParticipantHydrationDiagnostics;
 }
 
@@ -815,6 +817,12 @@ export async function hydrateParticipantProfiles(
   return {
     profiles: enriched.profiles,
     personaTaskLines: await hydratePersonaTaskLines(params, dependencies),
+    // Reused as the RAG memory-lane query text so document retrieval doesn't need its own pass.
+    personalMemoryTexts: enriched.profiles.flatMap((profile) =>
+      profile.fields
+        .filter((field) => field.kind === "personal_memories" && field.visibility.visible)
+        .flatMap((field) => field.lines),
+    ),
     diagnostics: {
       durationMs: performance.now() - startedAt,
       profileCount: enriched.profiles.length,

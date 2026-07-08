@@ -241,42 +241,29 @@ export async function insertDocumentWithChunks(params: {
   });
 }
 
-export async function retrieveRelevantDocumentChunks(params: {
+export interface WeightedQuery {
+  text: string;
+  weight: number;
+}
+
+/**
+ * Retrieves candidate chunks for a single query lane: hybrid vector + full-text
+ * search merged via intra-lane Reciprocal Rank Fusion (k=60), then filtered by
+ * minSimilarity with an FTS bypass (verbose chunks have dilute centroids that
+ * under-rate contextual queries, so a lexical match is trusted over the cosine floor).
+ */
+async function retrieveLaneChunks(params: {
   serverId: number;
   personaId?: number | null;
-  query: string;
+  queryText: string;
+  queryVector: string;
   embeddingModel: EmbeddingModelRow;
-  apiKey: string;
-  maxResults: number;
+  candidateLimit: number;
   minSimilarity: number;
-  batchSize?: number;
-  /** When set, excludes chunks whose document has channel_tags that don't include this channel */
   channelName?: string | null;
 }): Promise<RetrievedDocumentChunk[]> {
-  const { serverId, personaId, query, embeddingModel, apiKey, maxResults, minSimilarity, batchSize, channelName } =
+  const { serverId, personaId, queryText, queryVector, embeddingModel, candidateLimit, minSimilarity, channelName } =
     params;
-
-  if (!query.trim()) {
-    return [];
-  }
-
-  const queryEmbeddings = await generateEmbeddingsBatched({
-    provider: embeddingModel.provider,
-    apiKey,
-    model: embeddingModel.codename,
-    modelId: embeddingModel.embedding_model_id,
-    inputs: [query],
-    taskType: (await providerSupportsEmbeddingTaskType(embeddingModel.provider)) ? "RETRIEVAL_QUERY" : undefined,
-    batchSize,
-  });
-
-  if (queryEmbeddings.length === 0) {
-    return [];
-  }
-
-  const queryVector = formatVector(queryEmbeddings[0]);
-  // Cast a wide net so RRF has enough candidates from each ranked list to merge well.
-  const candidateLimit = maxResults * 4;
 
   const channelFilter =
     channelName != null
@@ -288,13 +275,6 @@ export async function retrieveRelevantDocumentChunks(params: {
       ? sql`AND d.persona_id IS NULL`
       : sql`AND (d.persona_id = ${personaId} OR d.persona_id IS NULL)`;
 
-  // Hybrid retrieval: vector similarity + full-text search merged via Reciprocal Rank Fusion.
-  //
-  // RRF score = Σ 1/(k + rank_i) for each ranked list a chunk appears in (k=60 is standard).
-  // Chunks that score well in both lists rank higher than single-list results, which is
-  // especially effective for proper-noun-heavy content where embeddings can miss exact name
-  // matches. fts_candidates is a no-op when plainto_tsquery returns an empty tsquery
-  // (all stop words), so pure vector ranking applies transparently as the fallback.
   const rows = await sql<
     Array<{
       document_id: number;
@@ -303,11 +283,10 @@ export async function retrieveRelevantDocumentChunks(params: {
       content: string;
       distance: number | string;
       fts_rank: number | string | null;
-      vector_rank: number | string | null;
     }>
   >`
     WITH fts_q AS (
-      SELECT plainto_tsquery('english', ${query}::text) AS q
+      SELECT plainto_tsquery('english', ${queryText}::text) AS q
     ),
     vector_candidates AS (
       SELECT dc.document_chunk_id,
@@ -340,8 +319,7 @@ export async function retrieveRelevantDocumentChunks(params: {
     rrf_merged AS (
       SELECT document_chunk_id,
              SUM(1.0 / (60.0 + rnk)) AS rrf_score,
-             MIN(CASE WHEN src = 'fts' THEN rnk END) AS fts_rank,
-             MIN(CASE WHEN src = 'vec' THEN rnk END) AS vector_rank
+             MIN(CASE WHEN src = 'fts' THEN rnk END) AS fts_rank
       FROM (
         SELECT document_chunk_id, rnk, 'vec'::text AS src FROM vector_candidates
         UNION ALL
@@ -351,20 +329,18 @@ export async function retrieveRelevantDocumentChunks(params: {
     )
     SELECT dc.document_id, d.document_name, dc.chunk_index, dc.content,
            (dc.embedding <=> ${queryVector}::vector) AS distance,
-           r.fts_rank, r.vector_rank
+           r.fts_rank
     FROM rrf_merged r
     JOIN document_chunks dc ON dc.document_chunk_id = r.document_chunk_id
     JOIN documents d ON d.document_id = dc.document_id
     ORDER BY r.rrf_score DESC
-    LIMIT ${maxResults}
+    LIMIT ${candidateLimit}
   `;
 
   const results: RetrievedDocumentChunk[] = [];
   for (const row of rows) {
     const distance = typeof row.distance === "string" ? Number.parseFloat(row.distance) : Number(row.distance);
     const similarity = Number.isFinite(distance) ? 1 - distance : 0;
-    // FTS hits bypass the cosine floor: verbose chunks have dilute centroids that under-rate
-    // contextual queries, so the lexical match is the trusted signal for those rows.
     const ftsMatched = row.fts_rank != null;
     if (similarity < minSimilarity && !ftsMatched) {
       continue;
@@ -379,6 +355,99 @@ export async function retrieveRelevantDocumentChunks(params: {
   }
 
   return results;
+}
+
+const LANE_FUSION_K = 60;
+
+export async function retrieveRelevantDocumentChunks(params: {
+  serverId: number;
+  personaId?: number | null;
+  /** Weighted query lanes (e.g. combined/user/memory). Empty-text or non-positive-weight lanes are skipped. */
+  queries: WeightedQuery[];
+  embeddingModel: EmbeddingModelRow;
+  apiKey: string;
+  maxResults: number;
+  minSimilarity: number;
+  batchSize?: number;
+  /** When set, excludes chunks whose document has channel_tags that don't include this channel */
+  channelName?: string | null;
+}): Promise<RetrievedDocumentChunk[]> {
+  const { serverId, personaId, queries, embeddingModel, apiKey, maxResults, minSimilarity, batchSize, channelName } =
+    params;
+
+  const activeQueries = queries.filter((q) => q.text.trim().length > 0 && q.weight > 0);
+  if (activeQueries.length === 0) {
+    return [];
+  }
+
+  const queryEmbeddings = await generateEmbeddingsBatched({
+    provider: embeddingModel.provider,
+    apiKey,
+    model: embeddingModel.codename,
+    modelId: embeddingModel.embedding_model_id,
+    inputs: activeQueries.map((q) => q.text),
+    taskType: (await providerSupportsEmbeddingTaskType(embeddingModel.provider)) ? "RETRIEVAL_QUERY" : undefined,
+    batchSize,
+  });
+
+  if (queryEmbeddings.length !== activeQueries.length) {
+    return [];
+  }
+
+  // Cast a wide net so RRF has enough candidates from each ranked list to merge well.
+  const candidateLimit = maxResults * 4;
+
+  const laneResultSets = await Promise.all(
+    activeQueries.map((laneQuery, idx) =>
+      retrieveLaneChunks({
+        serverId,
+        personaId,
+        queryText: laneQuery.text,
+        queryVector: formatVector(queryEmbeddings[idx]),
+        embeddingModel,
+        candidateLimit,
+        minSimilarity,
+        channelName,
+      }),
+    ),
+  );
+
+  // Inter-lane weighted RRF: score = Σ w_lane × 1/(k + rank_i), where rank_i is the
+  // chunk's position within lane i's already minSimilarity-filtered, intra-lane-fused
+  // list. Uniformly scaling weights (e.g. when a lane is dropped) never changes the
+  // resulting order, so no explicit renormalization is needed here.
+  const fused = new Map<
+    string,
+    { weightedScore: number; bestSimilarity: number; chunk: Omit<RetrievedDocumentChunk, "similarity"> }
+  >();
+  laneResultSets.forEach((laneResults, idx) => {
+    const weight = activeQueries[idx].weight;
+    laneResults.forEach((chunk, rankIndex) => {
+      const contribution = weight * (1 / (LANE_FUSION_K + rankIndex + 1));
+      const key = `${chunk.document_id}:${chunk.chunk_index}`;
+      const existing = fused.get(key);
+      if (existing) {
+        existing.weightedScore += contribution;
+        existing.bestSimilarity = Math.max(existing.bestSimilarity, chunk.similarity);
+      } else {
+        fused.set(key, {
+          weightedScore: contribution,
+          bestSimilarity: chunk.similarity,
+          chunk: {
+            document_id: chunk.document_id,
+            document_name: chunk.document_name,
+            chunk_index: chunk.chunk_index,
+            content: chunk.content,
+          },
+        });
+      }
+    });
+  });
+
+  return Array.from(fused.values())
+    .sort((a, b) => b.weightedScore - a.weightedScore)
+    .slice(0, maxResults)
+    .map((entry) => ({ ...entry.chunk, similarity: entry.bestSimilarity }));
 }
 
 export function formatRetrievedChunksForPrompt(chunks: RetrievedDocumentChunk[]): string | null {

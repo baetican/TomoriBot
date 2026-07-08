@@ -84,6 +84,9 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
   let nudgeInjectionDepth = 2;
   let memoryInjectionItems: StructuredContextItem[] | undefined;
   let memoryInjectionDepth = -1;
+  // Raw (unformatted) memory content resolved earlier in this pipeline — reused as
+  // the RAG memory-lane query text so document retrieval doesn't need its own pass.
+  const memoryLaneTexts: string[] = [];
   let uncensorDirective: string | undefined;
   const botName = tomoriNickname;
   const impersonatedMember =
@@ -184,7 +187,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
     : null;
 
   if (!isUserImpersonation) {
-    const serverMemoryItem = await buildServerMemoryContextItem({
+    const serverMemoryResult = await buildServerMemoryContextItem({
       tomoriState,
       guildId,
       serverName,
@@ -197,7 +200,8 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       client,
       convertMentions,
     });
-    if (serverMemoryItem) contextItems.push(serverMemoryItem);
+    if (serverMemoryResult.item) contextItems.push(serverMemoryResult.item);
+    memoryLaneTexts.push(...serverMemoryResult.memoryTexts);
   }
 
   await appendOptionalItem(
@@ -240,35 +244,34 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
       isUserImpersonation,
     }),
   );
-  await appendOptionalItem(
-    contextItems,
-    buildParticipantContextItem({
-      client,
-      guildId,
-      channelName,
-      channelId,
-      participantSeeds: preparedParticipantContext.discoveryPlan.seeds,
-      triggererName,
-      botName,
-      personaLineageId,
-      tomoriState,
-      tomoriConfig,
-      isDMChannel,
-      isUserImpersonation,
-      impersonatedUserId,
-      impersonatedIdentityName,
-      matrixUsers: preparedParticipantContext.matrixUsers,
-      syntheticUsers: preparedParticipantContext.syntheticUsers,
-      publicPersonaProfiles: preparedParticipantContext.publicPersonaProfiles,
-      preloadedReferencedUserRows: preparedParticipantContext.referencedUserRows,
-      referencedUserIds: preparedParticipantContext.referencedUserIds,
-      profileEnricherRegistry: preparedParticipantContext.profileEnricherRegistry,
-      toolPromptMacroResolver,
-      conversationCorpus,
-      snapshot,
-      convertMentions,
-    }),
-  );
+  const participantResult = await buildParticipantContextItem({
+    client,
+    guildId,
+    channelName,
+    channelId,
+    participantSeeds: preparedParticipantContext.discoveryPlan.seeds,
+    triggererName,
+    botName,
+    personaLineageId,
+    tomoriState,
+    tomoriConfig,
+    isDMChannel,
+    isUserImpersonation,
+    impersonatedUserId,
+    impersonatedIdentityName,
+    matrixUsers: preparedParticipantContext.matrixUsers,
+    syntheticUsers: preparedParticipantContext.syntheticUsers,
+    publicPersonaProfiles: preparedParticipantContext.publicPersonaProfiles,
+    preloadedReferencedUserRows: preparedParticipantContext.referencedUserRows,
+    referencedUserIds: preparedParticipantContext.referencedUserIds,
+    profileEnricherRegistry: preparedParticipantContext.profileEnricherRegistry,
+    toolPromptMacroResolver,
+    conversationCorpus,
+    snapshot,
+    convertMentions,
+  });
+  if (participantResult.item) contextItems.push(participantResult.item);
+  memoryLaneTexts.push(...participantResult.personalMemoryTexts);
 
   try {
     const actualTriggeringUserId = impersonatedUserId ?? snapshot?.triggererUserRow?.user_disc_id;
@@ -307,6 +310,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
         // Default (-1): anchor the block near the top as ambient knowledge (legacy).
         contextItems.push(...stmResult.memoryItems);
       }
+      memoryLaneTexts.push(...stmResult.memoryTexts);
     }
   } catch (error) {
     log.warn("Failed to build short-term memory context", error);
@@ -319,7 +323,13 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
   await appendOptionalItem(contextItems, buildVerbatimToolDefinitionsContextItem({ tomoriConfig, tomoriState }));
   await appendOptionalItem(
     contextItems,
-    buildServerDocumentContextItem({ tomoriState, simplifiedMessageHistory, triggererUserId, channelName }),
+    buildServerDocumentContextItem({
+      tomoriState,
+      simplifiedMessageHistory,
+      triggererUserId,
+      channelName,
+      memoryLaneTexts,
+    }),
   );
   await appendConditioningContext({
     contextItems,

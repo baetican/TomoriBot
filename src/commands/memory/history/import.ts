@@ -222,7 +222,7 @@ async function retrieveInCharacterChunks(params: {
     const chunks = await ragRepository.retrieveRelevantChunks({
       serverId,
       personaId,
-      query,
+      queries: [{ text: query, weight: 1 }],
       embeddingModel,
       apiKey: embeddingApiKey,
       maxResults,

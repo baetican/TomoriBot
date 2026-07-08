@@ -128,13 +128,13 @@ export async function buildServerMemoryContextItem(params: {
   channelMemoryEnabled: boolean;
   client: Client;
   convertMentions: MentionConverter;
-}): Promise<StructuredContextItem | null> {
+}): Promise<{ item: StructuredContextItem | null; memoryTexts: string[] }> {
   if (
     !params.tomoriState?.server_memories ||
     !Array.isArray(params.tomoriState.server_memories) ||
     params.tomoriState.server_memories.length === 0
   ) {
-    return null;
+    return { item: null, memoryTexts: [] };
   }
 
   const memoryLabel = params.isDMChannel
@@ -142,6 +142,7 @@ export async function buildServerMemoryContextItem(params: {
     : `\n## ${params.botName}'s Memories about ${params.serverName}\n`;
 
   let serverMemoryLines: string[] = [];
+  let memoryTexts: string[] = [];
   try {
     // Without a resolved server id + persona lineage there is nothing to scope
     // to treat it as "no memories" (the previous raw query interpolated NULL,
@@ -181,31 +182,37 @@ export async function buildServerMemoryContextItem(params: {
       // biome-ignore lint/style/noNonNullAssertion: a loaded server-memory row always carries its PK.
       formatMemoryWithId(row.server_memory_id!, row.content, row.tags ?? []),
     );
+    // Raw content (no ID/tag decoration) for the RAG memory query lane.
+    memoryTexts = filteredServerRows.map((row) => row.content);
   } catch (error) {
     log.warn("Failed to load server memories with IDs for context", error);
     serverMemoryLines = params.tomoriState.server_memories;
+    memoryTexts = params.tomoriState.server_memories;
   }
 
   if (serverMemoryLines.length === 0) {
-    return null;
+    return { item: null, memoryTexts };
   }
 
   return {
-    role: "system",
-    parts: [
-      {
-        type: "text",
-        text: await params.convertMentions(
-          `${memoryLabel}${serverMemoryLines.join("\n")}\n`,
-          params.client,
-          params.guildId,
-          "User",
-          params.botName,
-          params.personalMemoriesEnabled,
-        ),
-      },
-    ],
-    metadataTag: ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
+    item: {
+      role: "system",
+      parts: [
+        {
+          type: "text",
+          text: await params.convertMentions(
+            `${memoryLabel}${serverMemoryLines.join("\n")}\n`,
+            params.client,
+            params.guildId,
+            "User",
+            params.botName,
+            params.personalMemoriesEnabled,
+          ),
+        },
+      ],
+      metadataTag: ContextItemTag.KNOWLEDGE_SERVER_MEMORIES,
+    },
+    memoryTexts,
   };
 }
 
@@ -233,8 +240,11 @@ export async function buildShortTermMemoryContext(params: {
    * at this dialogue depth (counted in turns from the bottom, like the nudge).
    */
   memoryInjectionDepth: number;
+  /** Raw (unformatted) memory content, reused as the RAG memory-lane query text. */
+  memoryTexts: string[];
 }> {
   const memoryItems: StructuredContextItem[] = [];
+  const memoryTexts: string[] = [];
   let nudgeItem: StructuredContextItem | undefined;
 
   const expandPromptToolText = (macroText: string, fallbackText: string) =>
@@ -350,61 +360,57 @@ export async function buildShortTermMemoryContext(params: {
             ? `[System: Recent conversation with ${params.triggererName} in ${channelReference} (${relativeTime}):\n`
             : `[System: ${params.botName} remembers a recent conversation with ${params.triggererName} in ${channelReference} (${relativeTime}):\n`;
 
+        // Renders the additive Mode-B crude-message block and returns its raw text (or "").
+        const renderAdditiveCrudeBlock = (): string => {
+          if (!(renderMode === "crude_summary" && memory.messages.length > 0)) return "";
+          const crudePrefix = isSameServerSharedMemory
+            ? params.isUserImpersonation
+              ? `[System: Recent raw messages from ${channelReference}:\n`
+              : `[System: ${params.botName}'s recent raw messages from ${channelReference}:\n`
+            : params.isUserImpersonation
+              ? `[System: Recent raw messages with ${params.triggererName} in ${channelReference}:\n`
+              : `[System: ${params.botName}'s recent raw messages with ${params.triggererName} in ${channelReference}:\n`;
+          let crudeText = crudePrefix;
+          let rawCrudeMessagesText = "";
+          // Cap the rendered crude turns to the configured depth (most recent N).
+          for (const msg of memory.messages.slice(-crudeMessageCount)) {
+            const speaker =
+              msg.speakerName ||
+              (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
+            crudeText += `${speaker}: "${msg.content}"\n`;
+            rawCrudeMessagesText += `${speaker}: ${msg.content}\n`;
+          }
+          otherChannelText += `${crudeText}]\n\n`;
+          return rawCrudeMessagesText.trim();
+        };
+
         if (categoryContent) {
           // Category content available: use it as the primary memory representation
           otherChannelText += `${memoryPrefix}${categoryContent}]\n\n`;
+          memoryTexts.push(categoryContent);
 
-          // Mode B (crude_summary): also show recent crude messages additively for other-channel
-          if (renderMode === "crude_summary" && memory.messages.length > 0) {
-            const crudePrefix = isSameServerSharedMemory
-              ? params.isUserImpersonation
-                ? `[System: Recent raw messages from ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages from ${channelReference}:\n`
-              : params.isUserImpersonation
-                ? `[System: Recent raw messages with ${params.triggererName} in ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages with ${params.triggererName} in ${channelReference}:\n`;
-            let crudeText = crudePrefix;
-            // Cap the rendered crude turns to the configured depth (most recent N).
-            for (const msg of memory.messages.slice(-crudeMessageCount)) {
-              const speaker =
-                msg.speakerName ||
-                (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
-              crudeText += `${speaker}: "${msg.content}"\n`;
-            }
-            otherChannelText += `${crudeText}]\n\n`;
-          }
+          const rawCrudeText = renderAdditiveCrudeBlock();
+          if (rawCrudeText) memoryTexts.push(rawCrudeText);
         } else if (memory.summary) {
           // Single-blob summary (fallback / pre-category entries)
           otherChannelText += `${memoryPrefix}${memory.summary}]\n\n`;
+          memoryTexts.push(memory.summary);
 
-          if (renderMode === "crude_summary" && memory.messages.length > 0) {
-            const crudePrefix = isSameServerSharedMemory
-              ? params.isUserImpersonation
-                ? `[System: Recent raw messages from ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages from ${channelReference}:\n`
-              : params.isUserImpersonation
-                ? `[System: Recent raw messages with ${params.triggererName} in ${channelReference}:\n`
-                : `[System: ${params.botName}'s recent raw messages with ${params.triggererName} in ${channelReference}:\n`;
-            let crudeText = crudePrefix;
-            // Cap the rendered crude turns to the configured depth (most recent N).
-            for (const msg of memory.messages.slice(-crudeMessageCount)) {
-              const speaker =
-                msg.speakerName ||
-                (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
-              crudeText += `${speaker}: "${msg.content}"\n`;
-            }
-            otherChannelText += `${crudeText}]\n\n`;
-          }
+          const rawCrudeText = renderAdditiveCrudeBlock();
+          if (rawCrudeText) memoryTexts.push(rawCrudeText);
         } else {
           // No summary or categories: fall back to crude turn listing (capped to depth).
           otherChannelText += memoryPrefix;
+          let rawMessagesText = "";
           for (const msg of memory.messages.slice(-crudeMessageCount)) {
             const speaker =
               msg.speakerName ||
               (msg.role === "user" ? (isSameServerSharedMemory ? "Someone" : params.triggererName) : params.botName);
             otherChannelText += `${speaker}: "${msg.content}"\n`;
+            rawMessagesText += `${speaker}: ${msg.content}\n`;
           }
           otherChannelText += "]\n\n";
+          if (rawMessagesText.trim()) memoryTexts.push(rawMessagesText.trim());
         }
       }
 
@@ -502,6 +508,7 @@ export async function buildShortTermMemoryContext(params: {
         const summaryText = params.isUserImpersonation
           ? `[System: Short term memory for this ongoing conversation:\n${memoryBodyText}]`
           : `[System: ${params.botName}'s short term memory for this ongoing conversation:\n${memoryBodyText}]`;
+        memoryTexts.push(memoryBodyText);
 
         memoryItems.push({
           role: "user",
@@ -573,7 +580,7 @@ export async function buildShortTermMemoryContext(params: {
       ? resolveFreshInjectionDepth(configuredMemoryInjectionDepth)
       : configuredMemoryInjectionDepth;
 
-    return { memoryItems, nudgeItem, nudgeInjectionDepth, memoryInjectionDepth };
+    return { memoryItems, nudgeItem, nudgeInjectionDepth, memoryInjectionDepth, memoryTexts };
   } catch (error) {
     await log.error(
       `[buildShortTermMemoryContext] Failed to build short-term memory context - triggeringUserId=${params.triggeringUserId}, currentChannelId=${params.currentChannelId}`,
@@ -583,6 +590,6 @@ export async function buildShortTermMemoryContext(params: {
         metadata: { userDiscId: params.triggeringUserId, currentChannelId: params.currentChannelId },
       },
     );
-    return { memoryItems: [], nudgeInjectionDepth: 0, memoryInjectionDepth: -1 };
+    return { memoryItems: [], nudgeInjectionDepth: 0, memoryInjectionDepth: -1, memoryTexts: [] };
   }
 }
