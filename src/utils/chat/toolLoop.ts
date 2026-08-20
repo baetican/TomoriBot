@@ -37,7 +37,12 @@ const STREAM_SDK_CALL_TIMEOUT_MS = parseIntegerEnvFlag(process.env.STREAM_SDK_CA
 // before the fallback path's superseded-message cleanup runs, so it cannot leak past cleanup.
 const STREAM_ABANDONED_SETTLE_TIMEOUT_MS = parseIntegerEnvFlag(process.env.STREAM_ABANDONED_SETTLE_TIMEOUT_MS, 5000, 0);
 const TOOL_EXECUTION_TIMEOUT_MS = parseIntegerEnvFlag(process.env.TOOL_EXECUTION_TIMEOUT_MS, 300000, 10000);
-const TOOLS_SUPPRESS_FOLLOWUP_AFTER_PRETOOL_TEXT = new Set(["update_short_term_memory"]);
+const TOOLS_SUPPRESS_FOLLOWUP_AFTER_PRETOOL_TEXT = new Set([
+  "update_short_term_memory",
+  "create_long_term_memory",
+  "remember_this_fact",
+  "update_long_term_memory",
+]);
 const TOOL_FAILURE_NOTICE_LIMIT = 1800;
 
 export interface ToolLoopParams {
