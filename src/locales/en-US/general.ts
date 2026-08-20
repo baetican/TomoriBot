@@ -125,6 +125,8 @@
       invalid_option_description: `The selected option is invalid. Please choose a valid option.`,
       permission_denied_title: `Permission Denied`,
       permission_denied_description: `You don't have permission to use this command. Only members with \`Manage Server\` permissions can use this command.`,
+      not_bot_owner_title: `Bot Owner Only`,
+      not_bot_owner_description: `This command is restricted to the bot owner.`,
       server_not_found_title: `Server Not Found`,
       server_not_found_description: `Server information could not be found in the database. Please try again or contact support if the issue persists.`,
       generic_error_title: `Error`,

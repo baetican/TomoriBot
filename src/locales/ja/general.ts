@@ -125,6 +125,8 @@
       invalid_option_description: `選択されたオプションは無効です。有効なオプションを選択してください。`,
       permission_denied_title: `権限がありません`,
       permission_denied_description: `このコマンドを使用する権限がありません。\`サーバー管理\`権限を持つメンバーのみがこのコマンドを使用できます。`,
+      not_bot_owner_title: `ボットオーナー専用`,
+      not_bot_owner_description: `このコマンドはボットオーナーのみに制限されています。`,
       server_not_found_title: `サーバーが見つかりません`,
       server_not_found_description: `データベースにサーバー情報が見つかりませんでした。もう一度お試しいただくか、問題が解決しない場合はサポートにお問い合わせください。`,
       generic_error_title: `エラー`,
