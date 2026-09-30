@@ -26,11 +26,8 @@ interface UserCacheEntry {
  */
 const cache = new Map<string, UserCacheEntry>();
 
-/**
- * Cache duration: configurable via env, default 30 minutes.
- * Longer TTL for user data since it changes even less frequently than server config.
- */
-const USER_CACHE_DURATION_MS = (Number(process.env.USER_CACHE_TTL_MINUTES) || 30) * 60 * 1000;
+// Longer TTL than server config caches since user data changes even less frequently.
+const USER_CACHE_DURATION_MS = 30 * 60 * 1000;
 
 /**
  * Cache statistics for monitoring
@@ -40,13 +37,7 @@ let cacheMisses = 0;
 let blacklistCacheHits = 0;
 let blacklistCacheMisses = 0;
 
-/**
- * Gets or creates a cache entry for a user, loading from DB if needed.
- * Internal helper function used by the public cache accessors.
- *
- * @param userDiscId - Discord user ID
- * @returns UserCacheEntry (never null, creates entry with defaults if user not found)
- */
+/** Never null: creates an entry with defaults when the user is not found. */
 async function getOrCreateCacheEntry(userDiscId: string): Promise<UserCacheEntry> {
   const now = Date.now();
   const cachedEntry = cache.get(userDiscId);
@@ -82,20 +73,25 @@ async function getOrCreateCacheEntry(userDiscId: string): Promise<UserCacheEntry
   } catch (error) {
     log.error(`[User Cache] Error loading user data for ${userDiscId}:`, error);
 
-    // Return stale cache if available (graceful fallback)
+    // Stale data was read successfully at some point, so it beats a guess in either direction.
     if (cachedEntry) {
       log.warn(`[User Cache] Returning stale cache for user ${userDiscId} due to error`);
       return cachedEntry;
     }
 
-    const defaultEntry: UserCacheEntry = {
+    // FULL rather than MINIMAL: with nothing readable and nothing cached, the user's own
+    // setting is unknown, and over-protecting for one call costs nothing while the reverse
+    // exposes someone who chose to be invisible.
+    //
+    // Deliberately not written to `cache`: storing it would pin the restrictive guess for the
+    // whole 30 minute TTL, so a blip measured in seconds turned into a half hour of degraded
+    // personalization. Leaving it out makes the next call retry the database.
+    return {
       userRow: null,
-      privacyLevel: PrivacyLevel.MINIMAL,
+      privacyLevel: PrivacyLevel.FULL,
       blacklistStatus: new Map(),
       cachedAt: now,
     };
-    cache.set(userDiscId, defaultEntry);
-    return defaultEntry;
   }
 }
 
@@ -111,12 +107,7 @@ export async function getCachedUserRow(userDiscId: string): Promise<UserRow | nu
   return entry.userRow;
 }
 
-/**
- * Gets privacy level with 30-minute in-memory cache.
- *
- * @param userDiscId - Discord user ID
- * @returns PrivacyLevel (defaults to MINIMAL if not found)
- */
+/** Cached in memory for 30 minutes. Defaults to MINIMAL when the user is not found. */
 export async function getCachedPrivacyLevel(userDiscId: string): Promise<PrivacyLevel> {
   const entry = await getOrCreateCacheEntry(userDiscId);
   return entry.privacyLevel;
@@ -148,8 +139,11 @@ export async function getCachedBlacklistStatus(serverDiscId: string, userDiscId:
     entry.blacklistStatus.set(serverDiscId, isUserBlacklisted);
     return isUserBlacklisted;
   } catch (error) {
+    // Treat the restriction as still in force, and do not record it: a moderation control that
+    // lifts itself on a database hiccup is not a control, but neither should an unreadable
+    // database pin a user as blacklisted once the database recovers.
     log.error(`[User Cache] Error checking blacklist for user ${userDiscId} in server ${serverDiscId}:`, error);
-    return false;
+    return true;
   }
 }
 
@@ -173,6 +167,13 @@ export function invalidateUserCache(userDiscId: string): void {
 export function invalidateUserBlacklistCache(serverDiscId: string, userDiscId: string): void {
   const entry = cache.get(userDiscId);
   if (entry) {
+    entry.blacklistStatus.delete(serverDiscId);
+  }
+}
+
+/** Removes cached blacklist answers for a workspace while retaining unrelated user settings. */
+export function invalidateAllUserBlacklistCacheForServer(serverDiscId: string): void {
+  for (const entry of cache.values()) {
     entry.blacklistStatus.delete(serverDiscId);
   }
 }

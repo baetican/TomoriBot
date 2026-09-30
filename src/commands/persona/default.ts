@@ -7,6 +7,7 @@ import {
   type SlashCommandSubcommandBuilder,
 } from "discord.js";
 import { configRepository, personaRepository, personaSpriteRepository } from "@/utils/db/repositories";
+import { setGuildBotAvatar } from "@/utils/discord/guildIdentity";
 import { invalidatePersonaSpriteCache } from "@/utils/cache/personaSpriteCache";
 import { getCachedTomoriState, invalidateTomoriStateCache } from "../../utils/cache/tomoriStateCache";
 import { localizer, getBaseTriggerWords, getDefaultBotName } from "../../utils/text/localizer";
@@ -19,6 +20,8 @@ import { getCachedPresetAvatar, getPresetAvatarBuffer } from "../../utils/image/
 import { getMemoryLimits } from "@/utils/misc/memoryLimits";
 import { deletePersonaAvatarFromStorage, deletePersonaSpriteFromStorage } from "../../utils/storage/avatarStorage";
 import { dedupeTriggerWords, normalizeTriggerWord, selectUnclaimedTriggerWords } from "@/utils/text/triggerWords";
+import { orderPersonaPresetChoices } from "@/utils/persona/presetOrdering";
+import { localizedStatusTitle } from "@/utils/discord/ui/statusTitle";
 
 function isUniqueViolation(error: unknown): boolean {
   return (
@@ -37,7 +40,6 @@ export const PRESET_LINEAGE_BY_AVATAR: Record<string, number> = {
 };
 
 type PersonaDefaultTargetType = "default" | "alter";
-const DEFAULT_TARGET_TYPE: PersonaDefaultTargetType = "default";
 
 function normalizeForComparison(value: string): string {
   return normalizeTriggerWord(value);
@@ -136,7 +138,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
       option
         .setName("type")
         .setDescription(localizer("en-US", "commands.persona.default.type_description"))
-        .setRequired(false)
+        .setRequired(true)
         .addChoices(
           {
             name: localizer("en-US", "commands.persona.default.type_choice_default"),
@@ -151,7 +153,7 @@ export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =
 
 /**
  * Applies a preset personality configuration to Tomori.
- * - type=default (default): updates the main persona.
+ * - type=default: updates the main persona.
  * - type=alter: creates an alter persona from the selected preset.
  *
  * Preset trigger words come from persona_presets.preset_trigger_words,
@@ -175,7 +177,7 @@ export async function execute(
     return;
   }
 
-  const targetType = (interaction.options.getString("type") as PersonaDefaultTargetType | null) ?? DEFAULT_TARGET_TYPE;
+  const targetType = interaction.options.getString("type", true) as PersonaDefaultTargetType;
 
   if (targetType === "alter" && !interaction.guild) {
     await replyInfoEmbed(interaction, locale, {
@@ -226,7 +228,9 @@ export async function execute(
       return;
     }
 
-    const presetSelectOptions: SelectOption[] = presets.map((preset: TomoriPresetRow) => ({
+    const sortedPresets = orderPersonaPresetChoices(presets);
+
+    const presetSelectOptions: SelectOption[] = sortedPresets.map((preset: TomoriPresetRow) => ({
       label: safeSelectOptionText(preset.persona_preset_name),
       value: safeSelectOptionText(preset.persona_preset_name),
       description: safeSelectOptionText(preset.persona_preset_desc),
@@ -405,17 +409,9 @@ export async function execute(
             const avatarValue =
               cachedAvatar ??
               (presetAvatarBuffer ? `data:image/png;base64,${presetAvatarBuffer.toString("base64")}` : null);
-            const endpoint = `https://discord.com/api/v10/guilds/${interaction.guild.id}/members/@me`;
-            const response = await fetch(endpoint, {
-              method: "PATCH",
-              headers: {
-                Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ avatar: avatarValue }),
-            });
+            const response = await setGuildBotAvatar(interaction.guild.id, avatarValue);
 
-            if (response.ok) {
+            if (response.success) {
               const actionDescription = avatarValue
                 ? `Set preset avatar for "${selectedPreset.persona_preset_name}"`
                 : "Reset guild avatar to bot default";
@@ -426,7 +422,6 @@ export async function execute(
               await personaRepository.markServerMainAvatarSynced(interaction.guild.id);
             } else {
               avatarUpdateFailed = true;
-              log.warn(`Failed to update guild avatar: ${response.status} ${response.statusText}`);
             }
           }
         } catch (avatarError) {
@@ -453,10 +448,11 @@ export async function execute(
         descriptionLines.push(localizer(locale, "commands.persona.import.avatar_update_failed"));
       }
 
+      const successColor = isDM || avatarUpdateFailed || nicknameUpdateFailed ? ColorCode.WARN : ColorCode.SUCCESS;
       const successEmbed = new EmbedBuilder()
-        .setTitle(localizer(locale, "commands.persona.default.success_title"))
+        .setTitle(localizedStatusTitle(locale, "commands.persona.default.success_title", successColor))
         .setDescription(descriptionLines.join("\n\n"))
-        .setColor(isDM || avatarUpdateFailed || nicknameUpdateFailed ? ColorCode.WARN : ColorCode.SUCCESS);
+        .setColor(successColor);
 
       const footerParts: string[] = [];
       if (isDM) {
@@ -487,7 +483,7 @@ export async function execute(
         await modalSubmitInteraction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setTitle(localizer(locale, "general.errors.unknown_error_title"))
+              .setTitle(localizedStatusTitle(locale, "general.errors.unknown_error_title", ColorCode.ERROR))
               .setDescription(localizer(locale, "general.errors.unknown_error_description"))
               .setColor(ColorCode.ERROR),
           ],
@@ -504,16 +500,17 @@ export async function execute(
         `Applied preset "${selectedPreset.persona_preset_name}" to main persona for server ${tomoriState.server_id} by user ${userData.user_disc_id}`,
       );
 
+      const confirmationColor = avatarUpdateFailed || nicknameUpdateFailed ? ColorCode.WARN : ColorCode.SUCCESS;
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.default.success_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.persona.default.success_title", confirmationColor))
             .setDescription(
               localizer(locale, "commands.persona.default.success_confirmation", {
                 nickname: resolvedPersonaName,
               }),
             )
-            .setColor(avatarUpdateFailed || nicknameUpdateFailed ? ColorCode.WARN : ColorCode.SUCCESS),
+            .setColor(confirmationColor),
         ],
       });
       return;
@@ -615,10 +612,11 @@ export async function execute(
       descriptionParts.push(`\n\n${localizer(locale, "commands.persona.import.alter_no_triggers_warning")}`);
     }
 
+    const alterSuccessColor = hasNoTriggers ? ColorCode.WARN : ColorCode.SUCCESS;
     const successEmbed = new EmbedBuilder()
-      .setTitle(localizer(locale, "commands.persona.import.alter_success_title"))
+      .setTitle(localizedStatusTitle(locale, "commands.persona.import.alter_success_title", alterSuccessColor))
       .setDescription(descriptionParts.join(""))
-      .setColor(hasNoTriggers ? ColorCode.WARN : ColorCode.SUCCESS)
+      .setColor(alterSuccessColor)
       .setFooter({
         text: localizer(locale, "commands.persona.import.alter_avatar_warning"),
       });
@@ -644,7 +642,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "general.errors.unknown_error_title"))
+            .setTitle(localizedStatusTitle(locale, "general.errors.unknown_error_title", ColorCode.ERROR))
             .setDescription(localizer(locale, "general.errors.unknown_error_description"))
             .setColor(ColorCode.ERROR),
         ],
@@ -674,14 +672,14 @@ export async function execute(
     await modalSubmitInteraction.editReply({
       embeds: [
         new EmbedBuilder()
-          .setTitle(localizer(locale, "commands.persona.import.alter_success_title"))
+          .setTitle(localizedStatusTitle(locale, "commands.persona.import.alter_success_title", alterSuccessColor))
           .setDescription(
             localizer(locale, "commands.persona.import.alter_success_confirmation", {
               nickname: resolvedAlterName,
               trigger_count: uniqueAlterTriggers.length,
             }),
           )
-          .setColor(hasNoTriggers ? ColorCode.WARN : ColorCode.SUCCESS),
+          .setColor(alterSuccessColor),
       ],
     });
   } catch (error) {

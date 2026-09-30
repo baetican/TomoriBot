@@ -8,14 +8,8 @@ import type { TomoriState } from "@/types/db/schema";
 import type { SimplifiedMessageForContext } from "./types";
 
 const DOCUMENT_QUERY_MIN_LENGTH = 3;
-const DOCUMENT_MAX_RESULTS = (() => {
-  const parsed = Number.parseInt(process.env.DOCUMENT_MAX_RESULTS || "6", 10);
-  return Number.isFinite(parsed) ? Math.max(1, parsed) : 6;
-})();
-const DOCUMENT_MIN_SIMILARITY = (() => {
-  const parsed = Number.parseFloat(process.env.DOCUMENT_MIN_SIMILARITY || "0.5");
-  return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.5;
-})();
+const DOCUMENT_MAX_RESULTS = 6;
+const DOCUMENT_MIN_SIMILARITY = 0.5;
 
 // 3-lane weighted RAG query fusion: combined (recent dialogue) + user-only (intent
 // signal) + memory (server/personal/STM content already resolved earlier in the

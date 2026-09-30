@@ -1,5 +1,5 @@
 import type { ChatInputCommandInteraction, Client, SlashCommandBuilder } from "discord.js";
-import { EmbedBuilder } from "discord.js";
+import { EmbedBuilder, MessageFlags } from "discord.js";
 import type { UserRow, ErrorContext } from "@/types/db/schema";
 import { localizer } from "@/utils/text/localizer";
 import { log, ColorCode } from "@/utils/misc/logger";
@@ -11,7 +11,6 @@ const GITHUB_REPO = process.env.GITHUB_REPO || "Bredrumb/TomoriBot";
 /** Timeout in milliseconds for the GitHub API fetch */
 const GITHUB_API_TIMEOUT_MS = Number.parseInt(process.env.GITHUB_API_TIMEOUT_MS || "10000", 10);
 
-/** Discord embed description character limit */
 const EMBED_DESCRIPTION_LIMIT = 4096;
 
 /**
@@ -25,10 +24,6 @@ interface GitHubRelease {
   html_url: string;
 }
 
-/**
- * Configure the /update root command.
- * Posts the latest TomoriBot release notes as a public embed.
- */
 export const configureCommand = (command: SlashCommandBuilder) =>
   command.setName("update").setDescription(localizer("en-US", "commands.update.description"));
 
@@ -69,9 +64,9 @@ function cleanReleaseNotes(body: string, locale: string, htmlUrl: string): strin
 
 /**
  * Execute the /update command.
- * Fetches the latest release from GitHub's public API and posts it as a
- * public embed in the current channel, so mirroring the Discord webhook
- * notification sent by the CI/CD pipeline on deploy.
+ * Fetches the latest release from GitHub's public API and shows it only to the
+ * invoking user, in the same embed shape as the Discord webhook notification
+ * sent by the CI/CD pipeline on deploy.
  */
 export async function execute(
   _client: Client,
@@ -79,8 +74,8 @@ export async function execute(
   userData: UserRow,
   locale: string,
 ): Promise<void> {
-  // Defer publicly, because the release embed is intended for the channel, not just the user
-  await interaction.deferReply();
+  // Ephemerality is fixed at defer time: the later editReply and error replies inherit it.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
     // Fetch the latest release from GitHub's public REST API (no auth required)

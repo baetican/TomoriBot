@@ -19,7 +19,6 @@ import type { ChatInputCommandInteraction } from "discord.js";
 import type { ModalOptions } from "@/types/discord/modal";
 import { hasComponentsV2Reply, promptWithPaginatedModal } from "@/utils/discord/ui/interactionCore";
 
-/** One recorded acknowledgement call. */
 interface RecordedCall {
   method: "reply" | "editReply" | "webhook.send";
   payload: Record<string, unknown>;
@@ -29,12 +28,12 @@ interface RecordedCall {
 function makeOptions(count: number, selectorStyle?: "legacy" | "componentsV2"): ModalOptions {
   return {
     modalCustomId: "test_modal",
-    modalTitleKey: "commands.model.text.modal_title",
+    modalTitleKey: "commands.providers.add_provider_modal_title",
     selectorStyle,
     components: [
       {
         customId: "sel",
-        labelKey: "commands.model.text.select_label",
+        labelKey: "commands.providers.provider_label",
         options: Array.from({ length: count }, (_, index) => ({
           label: `option-${index}`,
           value: `value-${index}`,

@@ -6,6 +6,7 @@
 import type {
   ChatInputCommandInteraction,
   Client,
+  InteractionEditReplyOptions,
   ModalSubmitInteraction,
   SlashCommandSubcommandBuilder,
 } from "discord.js";
@@ -20,6 +21,7 @@ import {
   type PersonaResultContainerOptions,
 } from "@/utils/discord/ui/statusComponents";
 import { attachImportNowCollector, importNowButton } from "@/utils/persona/importNowButton";
+import { validateAndFallbackPanelPayload } from "@/utils/discord/ui/interactionCore";
 import type { UserRow } from "../../types/db/schema";
 import { memoryGuard, PERSONA_LIMITS, reservePersonaQuota } from "../../utils/security/rateLimiter";
 import { getMemoryLimits, validateAttribute, validateSampleDialogue } from "@/utils/misc/memoryLimits";
@@ -36,6 +38,7 @@ import { sanitizeAttachmentFilenamePart } from "@/utils/discord/attachmentFilena
 import { dedupeTriggerWords } from "@/utils/text/triggerWords";
 import type { PresetExport, PresetExportData } from "../../types/preset/presetExport";
 import type { ModalComponent } from "../../types/discord/modal";
+import { localizedStatusTitle } from "@/utils/discord/ui/statusTitle";
 
 const memoryLimits = getMemoryLimits();
 
@@ -50,9 +53,20 @@ function parsePersonaNameInput(input: string): string[] {
   return dedupeTriggerWords(input.split(/[,\u3001]/), { lowercase: false });
 }
 
-/**
- * Configure the 'create' subcommand
- */
+function buildCreateResultPayload(
+  options: PersonaResultContainerOptions,
+  attachment: AttachmentBuilder,
+): InteractionEditReplyOptions {
+  return validateAndFallbackPanelPayload(
+    {
+      components: buildPersonaResultContainer(options),
+      files: [attachment],
+      flags: MessageFlags.IsComponentsV2,
+    },
+    options.locale,
+  );
+}
+
 export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =>
   subcommand.setName("create").setDescription(localizer("en-US", "commands.persona.create.description"));
 
@@ -173,7 +187,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.create.desc_too_long_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.persona.create.desc_too_long_title", ColorCode.ERROR))
             .setDescription(
               localizer(locale, "commands.persona.create.desc_too_long_description", {
                 current_length: characterDesc.length.toString(),
@@ -192,7 +206,9 @@ export async function execute(
         await modalSubmitInteraction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setTitle(localizer(locale, "commands.persona.create.example_user_too_long_title"))
+              .setTitle(
+                localizedStatusTitle(locale, "commands.persona.create.example_user_too_long_title", ColorCode.ERROR),
+              )
               .setDescription(
                 localizer(locale, "commands.persona.create.example_user_too_long_description", {
                   current_length: exampleUser.length.toString(),
@@ -212,7 +228,9 @@ export async function execute(
         await modalSubmitInteraction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setTitle(localizer(locale, "commands.persona.create.example_bot_too_long_title"))
+              .setTitle(
+                localizedStatusTitle(locale, "commands.persona.create.example_bot_too_long_title", ColorCode.ERROR),
+              )
               .setDescription(
                 localizer(locale, "commands.persona.create.example_bot_too_long_description", {
                   current_length: exampleBot.length.toString(),
@@ -234,7 +252,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "rate_limit.error_quota_exceeded_title"))
+            .setTitle(localizedStatusTitle(locale, "rate_limit.error_quota_exceeded_title", ColorCode.ERROR))
             .setDescription(
               localizer(locale, "rate_limit.error_quota_exceeded_description", {
                 reset_time: resetTime,
@@ -254,7 +272,7 @@ export async function execute(
       if (memCheck.status === "critical") {
         // Preserve modal inputs for user convenience
         const embed = new EmbedBuilder()
-          .setTitle(localizer(locale, "rate_limit.error_memory_critical_title"))
+          .setTitle(localizedStatusTitle(locale, "rate_limit.error_memory_critical_title", ColorCode.ERROR))
           .setDescription(localizer(locale, "rate_limit.error_memory_critical_description"))
           .setColor(ColorCode.ERROR);
 
@@ -298,7 +316,7 @@ export async function execute(
         await modalSubmitInteraction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setTitle(localizer(locale, "commands.persona.create.invalid_image_title"))
+              .setTitle(localizedStatusTitle(locale, "commands.persona.create.invalid_image_title", ColorCode.ERROR))
               .setDescription(localizer(locale, "commands.persona.create.invalid_image_description"))
               .setColor(ColorCode.ERROR),
           ],
@@ -326,7 +344,7 @@ export async function execute(
           embeds: [
             new EmbedBuilder()
               .setTitle(
-                localizer(locale, errorKey, {
+                localizedStatusTitle(locale, errorKey, ColorCode.ERROR, {
                   max_size: PERSONA_LIMITS.MAX_AVATAR_SIZE_MB.toString(),
                 }),
               )
@@ -366,7 +384,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.create.validation_failed_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.persona.create.validation_failed_title", ColorCode.ERROR))
             .setDescription(
               `${localizer(
                 locale,
@@ -393,7 +411,9 @@ export async function execute(
         await modalSubmitInteraction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setTitle(localizer(locale, "commands.persona.create.image_processing_failed_title"))
+              .setTitle(
+                localizedStatusTitle(locale, "commands.persona.create.image_processing_failed_title", ColorCode.ERROR),
+              )
               .setDescription(localizer(locale, "commands.persona.create.image_processing_failed_description"))
               .setColor(ColorCode.ERROR),
           ],
@@ -411,7 +431,9 @@ export async function execute(
         await modalSubmitInteraction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setTitle(localizer(locale, "commands.persona.create.avatar_fetch_failed_title"))
+              .setTitle(
+                localizedStatusTitle(locale, "commands.persona.create.avatar_fetch_failed_title", ColorCode.ERROR),
+              )
               .setDescription(localizer(locale, "commands.persona.create.avatar_fetch_failed_description"))
               .setColor(ColorCode.ERROR),
           ],
@@ -436,7 +458,9 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.create.metadata_embed_failed_title"))
+            .setTitle(
+              localizedStatusTitle(locale, "commands.persona.create.metadata_embed_failed_title", ColorCode.ERROR),
+            )
             .setDescription(localizer(locale, "commands.persona.create.metadata_embed_failed_description"))
             .setColor(ColorCode.ERROR),
         ],
@@ -499,21 +523,18 @@ export async function execute(
     // Send the result. Create is guild-only, so attach the manager-only
     //     "Import Now" button to import the new persona as an alter in place.
     if (!interaction.guild) {
-      await modalSubmitInteraction.editReply({
-        components: buildPersonaResultContainer(successContainerOptions),
-        files: [attachment],
-        flags: MessageFlags.IsComponentsV2,
-      });
+      await modalSubmitInteraction.editReply(buildCreateResultPayload(successContainerOptions, attachment));
       replyUsesComponentsV2 = true;
     } else {
-      await modalSubmitInteraction.editReply({
-        components: buildPersonaResultContainer({
-          ...successContainerOptions,
-          button: importNowButton("active"),
-        }),
-        files: [attachment],
-        flags: MessageFlags.IsComponentsV2,
-      });
+      await modalSubmitInteraction.editReply(
+        buildCreateResultPayload(
+          {
+            ...successContainerOptions,
+            button: importNowButton("active"),
+          },
+          attachment,
+        ),
+      );
       replyUsesComponentsV2 = true;
 
       const sentMessage = await modalSubmitInteraction.fetchReply();
@@ -538,7 +559,7 @@ export async function execute(
 
     try {
       const errorEmbed = new EmbedBuilder()
-        .setTitle(localizer(locale, "general.errors.unexpected_title"))
+        .setTitle(localizedStatusTitle(locale, "general.errors.unexpected_title", ColorCode.ERROR))
         .setDescription(
           localizer(locale, "general.errors.unexpected_description", {
             error: errorMessage,

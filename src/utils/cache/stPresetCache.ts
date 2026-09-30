@@ -30,11 +30,8 @@ interface CacheEntry {
   cachedAt: number;
 }
 
-/**
- * Cache duration: configurable via env, default 10 minutes.
- * Matches the tomoriStateCache TTL since preset changes are similarly infrequent.
- */
-const CACHE_DURATION_MS = (Number(process.env.ST_PRESET_CACHE_TTL_MINUTES) || 10) * 60 * 1000;
+// Matches the tomoriStateCache TTL since preset changes are similarly infrequent.
+const CACHE_DURATION_MS = 10 * 60 * 1000;
 
 /** In-memory cache map: server_id (numeric) -> cache entry */
 const cache = new Map<number, CacheEntry>();
@@ -105,9 +102,6 @@ export function invalidateStPresetCache(serverId: number): void {
   cache.delete(serverId);
 }
 
-/**
- * Clear the entire preset cache. Used during shutdown or testing.
- */
 export function clearStPresetCache(): void {
   cache.clear();
 }

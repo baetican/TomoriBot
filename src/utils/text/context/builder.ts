@@ -7,9 +7,7 @@ import { buildContextNative } from "./nativeBuilder";
 import { resolveRandomChoiceMacrosInBuildOutput } from "./templates";
 import type { BuildContextParams, BuildContextResult } from "./types";
 
-/**
- * Builds model context, applying SillyTavern preset reassembly when one is active.
- */
+/** Applies SillyTavern preset reassembly when one is active. */
 export async function buildContext(params: BuildContextParams): Promise<BuildContextResult> {
   const messageIdMap = params.messageIdMap ?? new MessageIdMap();
   const paramsWithMap = { ...params, messageIdMap };
@@ -49,6 +47,7 @@ export async function buildContext(params: BuildContextParams): Promise<BuildCon
                     videogen_enabled: params.tomoriConfig.videogen_enabled,
                     voice_message_enabled: params.tomoriConfig.voice_message_enabled,
                     user_blocking_enabled: params.tomoriConfig.user_blocking_enabled,
+                    user_info_updates_enabled: params.tomoriConfig.user_info_updates_enabled,
                     thread_creation_enabled: params.tomoriConfig.thread_creation_enabled,
                   },
                 }
@@ -71,6 +70,8 @@ export async function buildContext(params: BuildContextParams): Promise<BuildCon
             client: params.client,
             guildId: params.guildId,
             triggererName: params.triggererName,
+            triggererFormattedName: params.triggererFormattedName,
+            triggererAddressTerm: params.triggererAddressTerm,
             botName: params.tomoriNickname,
             personalMemoriesEnabled: params.tomoriConfig.personal_memories_enabled ?? true,
             toolPromptMacroResolver: presetToolPromptMacroResolver,

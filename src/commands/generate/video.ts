@@ -31,10 +31,11 @@ import {
   resolveCapabilityCredentials,
 } from "@/utils/provider/credentialResolver";
 import { applyPersonalProviderSelectionsToTomoriState } from "@/utils/provider/personalProviderRuntime";
-import { formatCustomEndpointModelDisplay } from "@/utils/provider/customProviderUtils";
+import { formatCustomModelDisplay } from "@/utils/provider/customProviderUtils";
 import { MEDIA_LIMITS } from "@/utils/security/rateLimiter";
 import { safeDownload } from "@/utils/security/safeDownload";
 import { isOpenRouterVideoCapabilityError } from "@/providers/openrouter/openrouterVideoRequest";
+import { localizedStatusTitle } from "@/utils/discord/ui/statusTitle";
 
 const MODAL_CUSTOM_ID = "generate_video_modal";
 const PROMPT_INPUT_ID = "prompt_input";
@@ -89,9 +90,6 @@ function parseModalInteger(raw: string | undefined, min: number, max: number): {
   return { value: parsed };
 }
 
-/**
- * Configure the subcommand
- */
 export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =>
   subcommand.setName("video").setDescription(localizer("en-US", "commands.generate.video.description"));
 
@@ -194,6 +192,14 @@ export async function execute(
     });
   } catch (error) {
     if (error instanceof PersonalProviderRequiredError) {
+      log.warn(`[Generate Video] Personal provider required for video generation`, error, {
+        userId: userData.user_id,
+        serverId: tomoriState.server_id,
+        personaId: tomoriState.persona_id,
+        metadata: {
+          command: "generate video",
+        },
+      });
       await replyInfoEmbed(interaction, locale, {
         titleKey: "general.errors.personal_provider_required_title",
         descriptionKey: "general.errors.personal_provider_required_description",
@@ -204,6 +210,20 @@ export async function execute(
     }
 
     if (error instanceof CredentialUnavailableError) {
+      log.warn(
+        `[Generate Video] Video credentials unavailable: source=${error.source}, reason=${error.reason}`,
+        error,
+        {
+          userId: userData.user_id,
+          serverId: tomoriState.server_id,
+          personaId: tomoriState.persona_id,
+          metadata: {
+            command: "generate video",
+            source: error.source,
+            reason: error.reason,
+          },
+        },
+      );
       if (error.source === "personal") {
         await replyInfoEmbed(interaction, locale, {
           titleKey: "general.errors.personal_provider_credentials_error_title",
@@ -238,6 +258,14 @@ export async function execute(
 
   const videoModelId = getResolvedCapabilityModelId(videoCreds, "video") ?? tomoriState.config.video_model_id;
   if (!videoModelId) {
+    log.warn(`[Generate Video] No video model configured for server ${tomoriState.server_id}`, undefined, {
+      userId: userData.user_id,
+      serverId: tomoriState.server_id,
+      personaId: tomoriState.persona_id,
+      metadata: {
+        command: "generate video",
+      },
+    });
     await replyInfoEmbed(interaction, locale, {
       titleKey: "commands.generate.video.no_video_model_title",
       descriptionKey: "commands.generate.video.no_video_model_description",
@@ -379,7 +407,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.generate.video.invalid_duration_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.generate.video.invalid_duration_title", ColorCode.ERROR))
             .setDescription(
               localizer(locale, "commands.generate.video.invalid_duration_description", {
                 max: MAX_VIDEO_DURATION_SECONDS.toString(),
@@ -397,7 +425,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.generate.video.invalid_fps_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.generate.video.invalid_fps_title", ColorCode.ERROR))
             .setDescription(
               localizer(locale, "commands.generate.video.invalid_fps_description", {
                 max: MAX_VIDEO_FPS.toString(),
@@ -422,7 +450,7 @@ export async function execute(
         await modalSubmitInteraction.editReply({
           embeds: [
             new EmbedBuilder()
-              .setTitle(localizer(locale, "commands.generate.video.invalid_image_title"))
+              .setTitle(localizedStatusTitle(locale, "commands.generate.video.invalid_image_title", ColorCode.ERROR))
               .setDescription(localizer(locale, "commands.generate.video.invalid_image_description"))
               .setColor(ColorCode.ERROR),
           ],
@@ -433,7 +461,7 @@ export async function execute(
 
     const modelCodename = await getVideoModelCodename(videoModelId);
     const displayModelName = videoCreds.customEndpoint
-      ? formatCustomEndpointModelDisplay(videoCreds.customEndpoint)
+      ? formatCustomModelDisplay(videoCreds.customEndpoint)
       : modelCodename;
 
     log.info(
@@ -510,7 +538,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.generate.video.error_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.generate.video.error_title", ColorCode.ERROR))
             .setDescription(
               localizer(locale, "commands.generate.video.unsupported_provider_description", {
                 provider: executionProvider,
@@ -526,7 +554,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.generate.video.error_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.generate.video.error_title", ColorCode.ERROR))
             .setDescription(localizer(locale, "commands.generate.video.no_data_description"))
             .setColor(ColorCode.ERROR),
         ],
@@ -539,7 +567,7 @@ export async function execute(
       await modalSubmitInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.generate.video.file_too_large_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.generate.video.file_too_large_title", ColorCode.ERROR))
             .setDescription(
               localizer(locale, "commands.generate.video.file_too_large_description", { size_mb: sizeMB }),
             )
@@ -566,7 +594,7 @@ export async function execute(
     await modalSubmitInteraction.editReply({
       embeds: [
         new EmbedBuilder()
-          .setTitle(localizer(locale, "commands.generate.video.success_title"))
+          .setTitle(localizedStatusTitle(locale, "commands.generate.video.success_title", ColorCode.SUCCESS))
           .setDescription(
             localizer(locale, "commands.generate.video.success_description", {
               model: displayModelName,
@@ -600,7 +628,7 @@ export async function execute(
 
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorEmbed = new EmbedBuilder()
-      .setTitle(localizer(locale, "commands.generate.video.error_title"))
+      .setTitle(localizedStatusTitle(locale, "commands.generate.video.error_title", ColorCode.ERROR))
       .setDescription(
         isOpenRouterVideoCapabilityError(error)
           ? localizer(

@@ -275,6 +275,13 @@ async function retrieveLaneChunks(params: {
       ? sql`AND d.persona_id IS NULL`
       : sql`AND (d.persona_id = ${personaId} OR d.persona_id IS NULL)`;
 
+  // Hybrid retrieval: vector similarity + full-text search merged via Reciprocal Rank Fusion.
+  //
+  // RRF score = Σ 1/(k + rank_i) for each ranked list a chunk appears in (k=60 is standard).
+  // Chunks that score well in both lists rank higher than single-list results, which is
+  // especially effective for proper-noun-heavy content where embeddings can miss exact name
+  // matches. fts_candidates is a no-op when plainto_tsquery returns an empty tsquery (all
+  // stop words), so pure vector ranking applies transparently as the fallback.
   const rows = await sql<
     Array<{
       document_id: number;

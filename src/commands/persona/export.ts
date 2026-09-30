@@ -23,6 +23,7 @@ import { personaRepository } from "@/utils/db/repositories";
 import { sanitizeAttachmentFilenamePart } from "@/utils/discord/attachmentFilename";
 import { convertToPNG } from "@/utils/image/imageProcessor";
 import { loadStoredPersonaAvatarBuffer } from "@/utils/storage/avatarStorage";
+import { localizedStatusTitle } from "@/utils/discord/ui/statusTitle";
 
 const PERSONA_EXPORT_MODAL_ID = "persona_export_persona_modal";
 const PERSONA_EXPORT_SELECT_ID = "persona_select";
@@ -30,9 +31,6 @@ const PERSONA_EXPORT_JSON_SELECT_ID = "export_json_select";
 const PERSONA_EXPORT_JSON_FALSE = "false";
 const PERSONA_EXPORT_JSON_TRUE = "true";
 
-/**
- * Configure the 'export' subcommand
- */
 export const configureSubcommand = (subcommand: SlashCommandSubcommandBuilder) =>
   subcommand.setName("export").setDescription(localizer("en-US", "commands.persona.export.description"));
 
@@ -128,7 +126,7 @@ export async function execute(
       await responseInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.export.failed_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.persona.export.failed_title", ColorCode.ERROR))
             .setDescription(localizer(locale, exportResult.error))
             .setColor(ColorCode.ERROR),
         ],
@@ -173,7 +171,7 @@ export async function execute(
       await responseInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.export.success_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.persona.export.success_title", ColorCode.SUCCESS))
             .setDescription(
               localizer(locale, "commands.persona.export.success_description_json", {
                 nickname,
@@ -221,7 +219,7 @@ export async function execute(
       await responseInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.export.avatar_failed_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.persona.export.avatar_failed_title", ColorCode.ERROR))
             .setDescription(localizer(locale, "commands.persona.export.avatar_failed_description"))
             .setColor(ColorCode.ERROR),
         ],
@@ -240,7 +238,7 @@ export async function execute(
       await responseInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "commands.persona.export.embed_failed_title"))
+            .setTitle(localizedStatusTitle(locale, "commands.persona.export.embed_failed_title", ColorCode.ERROR))
             .setDescription(localizer(locale, "commands.persona.export.embed_failed_description"))
             .setColor(ColorCode.ERROR),
         ],
@@ -264,7 +262,7 @@ export async function execute(
     await responseInteraction.editReply({
       embeds: [
         new EmbedBuilder()
-          .setTitle(localizer(locale, "commands.persona.export.success_title"))
+          .setTitle(localizedStatusTitle(locale, "commands.persona.export.success_title", ColorCode.SUCCESS))
           .setDescription(
             localizer(locale, "commands.persona.export.success_description", {
               nickname: nickname,
@@ -294,7 +292,7 @@ export async function execute(
       await responseInteraction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle(localizer(locale, "general.errors.unknown_error_title"))
+            .setTitle(localizedStatusTitle(locale, "general.errors.unknown_error_title", ColorCode.ERROR))
             .setDescription(localizer(locale, "general.errors.unknown_error_description"))
             .setColor(ColorCode.ERROR),
         ],

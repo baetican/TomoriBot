@@ -1,5 +1,5 @@
-import { ButtonStyle } from "discord.js";
-import type { ButtonInteraction, ColorResolvable, EmbedBuilder, MessageFlags } from "discord.js";
+import type { ButtonStyle } from "discord.js";
+import type { AttachmentBuilder, ButtonInteraction, ColorResolvable, EmbedBuilder, MessageFlags } from "discord.js";
 
 /**
  * Options for creating a standard info/status embed.
@@ -17,13 +17,13 @@ export interface StandardEmbedOptions {
   flags?: MessageFlags;
   timestamp?: boolean;
   /**
-   * Optional atomic tip-item locale keys. When present, embed senders append a separate green
-   * "💡 Tip" embed rendering these keys as a dashed bullet list. Prefer this over baking tips into
-   * the main embed's description/footer , so a footer cannot render markdown or hyperlinks.
+   * Optional atomic tip-item locale keys. When present, embed senders add a button that opens
+   * these keys as a dashed bullet list in a read-only text modal.
    */
   tipKeys?: string[];
   /** Shared interpolation vars applied to every tip item in {@link tipKeys}. */
   tipVars?: Record<string, string | number | boolean>;
+  files?: AttachmentBuilder[];
 }
 
 /**
@@ -36,9 +36,6 @@ export interface TranslationEmbedOptions {
   timeout?: number;
 }
 
-/**
- * Options for confirmation embeds with buttons
- */
 export interface ConfirmationOptions {
   embedTitleKey: string;
   embedDescriptionKey: string;
@@ -50,19 +47,15 @@ export interface ConfirmationOptions {
   continueCustomId: string;
   cancelCustomId: string;
   timeout?: number;
+  continueStyle?: ButtonStyle.Secondary | ButtonStyle.Danger;
+  cancelStyle?: ButtonStyle.Secondary | ButtonStyle.Danger;
 }
 
-/**
- * Result type for confirmation interactions
- */
 export type ConfirmationResult = {
   outcome: "continue" | "cancel" | "timeout";
   interaction?: ButtonInteraction; // The button interaction if outcome is 'continue'
 };
 
-/**
- * Available translation providers
- */
 export enum TranslationProvider {
   GOOGLE = "google",
   BING = "bing",
@@ -75,14 +68,6 @@ export const TRANSLATOR_COLORS = {
   [TranslationProvider.GOOGLE]: "#DE3163", // Google red
   [TranslationProvider.BING]: "#7DDA58", // Bing green
 } as const satisfies Record<TranslationProvider, ColorResolvable>;
-
-/**
- * Discord button styles for translation providers
- */
-export const TRANSLATOR_STYLES = {
-  [TranslationProvider.GOOGLE]: ButtonStyle.Danger,
-  [TranslationProvider.BING]: ButtonStyle.Success,
-} as const satisfies Record<TranslationProvider, ButtonStyle>;
 
 export interface SummaryEmbedOptions extends StandardEmbedOptions {
   docsPath?: string;
@@ -103,9 +88,6 @@ export interface SummaryEmbedOptions extends StandardEmbedOptions {
   appendEmbeds?: EmbedBuilder[];
 }
 
-/**
- * Interface for paginated choice options
- */
 export interface PaginatedChoiceOptions {
   titleKey: string; // Localization key for the embed title
   titleVars?: Record<string, string | number | boolean>; // Variables for the title localization
@@ -122,9 +104,6 @@ export interface PaginatedChoiceOptions {
   flags?: MessageFlags;
 }
 
-/**
- * Result of a paginated choice selection
- */
 export interface PaginatedChoiceResult {
   success: boolean; // Whether a selection was made successfully
   selectedIndex?: number; // The index of the selected item (if success is true)
