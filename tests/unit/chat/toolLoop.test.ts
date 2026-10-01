@@ -704,26 +704,26 @@ describe("runToolLoop — contract tests", () => {
     { toolName: "create_long_term_memory", registryLookups: 1 },
     { toolName: "remember_this_fact", registryLookups: 1 },
     { toolName: "update_long_term_memory", registryLookups: 1 },
-  ])(
-    "$toolName with pre-tool text still ends the turn without a follow-up call",
-    async ({ toolName, registryLookups }) => {
-      const { runToolLoop } = await import("@/utils/chat/toolLoop");
+  ])("$toolName with pre-tool text still ends the turn without a follow-up call", async ({
+    toolName,
+    registryLookups,
+  }) => {
+    const { runToolLoop } = await import("@/utils/chat/toolLoop");
 
-      const { provider, capturedHistories } = makeProvider([
-        makeFunctionCallResult(toolName, { content: "note" }, "Got it, noting that down."),
-      ]);
-      toolExecuteQueue.push({ success: true, data: { saved: true } });
+    const { provider, capturedHistories } = makeProvider([
+      makeFunctionCallResult(toolName, { content: "note" }, "Got it, noting that down."),
+    ]);
+    toolExecuteQueue.push({ success: true, data: { saved: true } });
 
-      const context = makeContext();
-      const result = await runToolLoop(makeParams(context, provider));
+    const context = makeContext();
+    const result = await runToolLoop(makeParams(context, provider));
 
-      // Suppress-set tool ends the turn after pre-tool text; the visible text is the response.
-      expect(result.status).toBe("completed");
-      expect(capturedHistories).toHaveLength(1);
-      expect(result.personaResponses[0]?.text).toBe("Got it, noting that down.");
-      expect(requiresFollowUpCalls).toHaveLength(registryLookups);
-    },
-  );
+    // Suppress-set tool ends the turn after pre-tool text; the visible text is the response.
+    expect(result.status).toBe("completed");
+    expect(capturedHistories).toHaveLength(1);
+    expect(result.personaResponses[0]?.text).toBe("Got it, noting that down.");
+    expect(requiresFollowUpCalls).toHaveLength(registryLookups);
+  });
 
   it("successful sticker selection is carried on the completed result", async () => {
     const { runToolLoop } = await import("@/utils/chat/toolLoop");

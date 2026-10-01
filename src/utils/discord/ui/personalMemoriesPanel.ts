@@ -16,11 +16,12 @@ import type { PanelReadStatus, PanelReceipt } from "@/types/discord/panel";
 import type { RawDiscordComponent } from "@/types/discord/rawApiTypes";
 import { resolveRangeSelection } from "@/utils/discord/interactions/panelController";
 import {
-  buildPersonalMemoriesRouteId,
-  buildPersonalMemoriesRouteSegments,
-  PERSONAL_MEMORIES_ROUTE_NAMESPACE,
-  PERSONAL_MEMORIES_ROUTE_VERSION,
+  buildContextualPersonalMemoriesRouteId,
+  buildContextualPersonalMemoriesRouteSegments,
+  SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT,
   type PersonalMemoriesCategory,
+  type PersonalMemoriesPanelRoute,
+  type PersonalMemoriesRouteContext,
 } from "@/utils/discord/personalMemoriesPanelCatalog";
 import {
   buildCategoryButtonRow,
@@ -102,7 +103,8 @@ const memoryLimits = getMemoryLimits();
 
 type PersonalMemoriesPanelPage =
   | { kind: "main"; selectedMemoryId?: number; rangeIndex?: number; personaRangeIndex?: number }
-  | { kind: "remove"; memoryId: number };
+  | { kind: "remove"; memoryId: number }
+  | { kind: "admin-pick" };
 
 export interface PersonalMemoriesPanelPayload {
   components: TopLevelComponentData[];
@@ -123,6 +125,17 @@ export interface PersonalMemoriesPanelRenderInput {
   readStatus: PanelReadStatus;
   page: PersonalMemoriesPanelPage;
   receipt?: PanelReceipt;
+  /** Where the panel's custom IDs route; defaults to the invoker's own panel. */
+  routeContext?: PersonalMemoriesRouteContext;
+  /** Present in bot-owner admin mode: the panel shows another member's memories, edit and remove only. */
+  admin?: { targetName: string };
+  /** Shows the owner-only "Manage a member" entry on the invoker's own panel. */
+  canManageMembers?: boolean;
+  /**
+   * Admin mode only: the target's lineages with no persona in this workspace. They render by stored
+   * nickname so memories kept under another server's persona stay reachable.
+   */
+  extraLineages?: ReadonlyArray<{ lineageId: number; nickname: string | null }>;
 }
 
 export function parsePersonalMemoryTags(rawTags: string): string[] {
@@ -145,7 +158,13 @@ export function buildAddPersonalMemoryModal(
   nonce: string,
 ): { custom_id: string; title: string; components: RawDiscordComponent[] } {
   return {
-    custom_id: buildPersonalMemoriesRouteId({ action: "add-submit", locale, category, lineageId, nonce }),
+    custom_id: buildContextualPersonalMemoriesRouteId(SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT, {
+      action: "add-submit",
+      locale,
+      category,
+      lineageId,
+      nonce,
+    }),
     title: safeSelectOptionText(localizer(locale, "commands.personal.memories.add_modal_title"), 45),
     components: [
       {
@@ -211,9 +230,10 @@ export function buildEditPersonalMemoryModal(
   content: string,
   tags: string[],
   nonce: string,
+  routeContext: PersonalMemoriesRouteContext = SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT,
 ): { custom_id: string; title: string; components: RawDiscordComponent[] } {
   return {
-    custom_id: buildPersonalMemoriesRouteId({
+    custom_id: buildContextualPersonalMemoriesRouteId(routeContext, {
       action: "edit-submit",
       locale,
       category,
@@ -268,6 +288,7 @@ function buildRetryRow(
   locale: string,
   category: PersonalMemoriesCategory,
   lineageId: number,
+  routeContext: PersonalMemoriesRouteContext,
 ): ActionRowData<ButtonComponentData> {
   return {
     type: ComponentType.ActionRow,
@@ -275,7 +296,12 @@ function buildRetryRow(
       {
         type: ComponentType.Button,
         style: ButtonStyle.Secondary,
-        customId: buildPersonalMemoriesRouteId({ action: "retry", locale, category, lineageId }),
+        customId: buildContextualPersonalMemoriesRouteId(routeContext, {
+          action: "retry",
+          locale,
+          category,
+          lineageId,
+        }),
         label: localizer(locale, "commands.personal.memories.retry"),
       },
     ],
@@ -313,21 +339,63 @@ export function buildPersonalMemoriesPanelPayload(
     readStatus,
     page,
     receipt,
+    admin,
+    canManageMembers = false,
+    extraLineages = [],
   } = input;
+  const routeContext = input.routeContext ?? SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT;
+  const routeId = (route: PersonalMemoriesPanelRoute) => buildContextualPersonalMemoriesRouteId(routeContext, route);
   const writesDisabled = readStatus !== "fresh";
   const isPrivacyFull = privacyLevel === PrivacyLevel.FULL;
+  const privacyWarningKey = admin
+    ? "commands.personal.memories.admin_privacy_full_warning"
+    : "commands.personal.memories.privacy_full_warning";
+
+  if (page.kind === "admin-pick") {
+    return buildPayload(
+      [
+        {
+          type: ComponentType.TextDisplay,
+          content: `### ${localizer(locale, "commands.personal.memories.admin_pick_title")}
+${localizer(locale, "commands.personal.memories.admin_pick_description")}`,
+        },
+        {
+          type: ComponentType.ActionRow,
+          components: [
+            {
+              type: ComponentType.UserSelect,
+              customId: routeId({ action: "admin-pick", locale }),
+              placeholder: localizer(locale, "commands.personal.memories.admin_pick_placeholder"),
+            },
+          ],
+        },
+        {
+          type: ComponentType.ActionRow,
+          components: [
+            {
+              type: ComponentType.Button,
+              style: ButtonStyle.Secondary,
+              customId: routeId({ action: "category", locale, category: "global" }),
+              label: localizer(locale, "commands.personal.memories.cancel"),
+            },
+          ],
+        },
+      ],
+      receipt,
+    );
+  }
 
   const categoryButtons = buildCategoryButtonRow(
     [
       {
         id: "global",
         label: localizer(locale, "commands.personal.memories.category_global"),
-        customId: buildPersonalMemoriesRouteId({ action: "category", locale, category: "global" }),
+        customId: routeId({ action: "category", locale, category: "global" }),
       },
       {
         id: "persona",
         label: localizer(locale, "commands.personal.memories.category_persona"),
-        customId: buildPersonalMemoriesRouteId({ action: "category", locale, category: "persona" }),
+        customId: routeId({ action: "category", locale, category: "persona" }),
       },
     ],
     category,
@@ -339,13 +407,41 @@ export function buildPersonalMemoriesPanelPayload(
     { type: ComponentType.Separator, divider: true, spacing: 1 },
   ];
 
+  if (admin) {
+    components.push(
+      {
+        type: ComponentType.TextDisplay,
+        content: withLinePrefix(
+          "> ",
+          `🛠️ ${localizer(locale, "commands.personal.memories.admin_banner", { member: admin.targetName })}`,
+        ),
+      },
+      {
+        type: ComponentType.ActionRow,
+        components: [
+          {
+            type: ComponentType.Button,
+            style: ButtonStyle.Secondary,
+            // Leaves admin mode by routing back into the invoker's own panel namespace.
+            customId: buildContextualPersonalMemoriesRouteId(SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT, {
+              action: "category",
+              locale,
+              category: "global",
+            }),
+            label: localizer(locale, "commands.personal.memories.admin_exit_button"),
+          },
+        ],
+      },
+    );
+  }
+
   if (readStatus === "unavailable") {
     components.push(
       {
         type: ComponentType.TextDisplay,
         content: `### ${localizer(locale, "commands.personal.memories.unavailable")}`,
       },
-      buildRetryRow(locale, category, selectedLineageId),
+      buildRetryRow(locale, category, selectedLineageId, routeContext),
     );
     return buildPayload(components, receipt);
   }
@@ -377,7 +473,7 @@ ${localizer(locale, "commands.personal.memories.remove_confirm_description", {
             {
               type: ComponentType.Button,
               style: ButtonStyle.Danger,
-              customId: buildPersonalMemoriesRouteId({
+              customId: routeId({
                 action: "remove-confirm",
                 locale,
                 category,
@@ -390,7 +486,7 @@ ${localizer(locale, "commands.personal.memories.remove_confirm_description", {
             {
               type: ComponentType.Button,
               style: ButtonStyle.Secondary,
-              customId: buildPersonalMemoriesRouteId({
+              customId: routeId({
                 action: "remove-cancel",
                 locale,
                 category,
@@ -433,7 +529,7 @@ ${localizer(locale, "commands.personal.memories.selector_guidance")}`,
     if (isPrivacyFull) {
       components.push({
         type: ComponentType.TextDisplay,
-        content: withLinePrefix("> ", `⚠️ ${localizer(locale, "commands.personal.memories.privacy_full_warning")}`),
+        content: withLinePrefix("> ", `⚠️ ${localizer(locale, privacyWarningKey)}`),
       });
     }
 
@@ -459,7 +555,7 @@ ${localizer(locale, "commands.personal.memories.selector_guidance")}`,
       components: [
         {
           type: ComponentType.StringSelect,
-          customId: buildPersonalMemoriesRouteId({
+          customId: routeId({
             action: "select",
             locale,
             category: "global",
@@ -467,22 +563,23 @@ ${localizer(locale, "commands.personal.memories.selector_guidance")}`,
             rangeIndex: rangeSelection.rangeIndex,
           }),
           placeholder: localizer(locale, "commands.personal.memories.select_placeholder"),
-          options: [addOption, ...memoryOptions],
+          options: admin ? memoryOptions : [addOption, ...memoryOptions],
           disabled: writesDisabled,
         },
       ],
     };
-    components.push(selectRow);
+    // Discord rejects a select with no options, which only admin mode can produce (no add option).
+    if (selectRow.components[0]?.options?.length) components.push(selectRow);
 
     const memoryPaginationRow = buildPaginationRow({
       locale,
       rangeIndex: rangeSelection.rangeIndex,
       rangeCount: rangeSelection.rangeCount,
-      namespace: PERSONAL_MEMORIES_ROUTE_NAMESPACE,
-      version: PERSONAL_MEMORIES_ROUTE_VERSION,
+      namespace: routeContext.namespace,
+      version: routeContext.version,
       buildSegments: {
         page: (rangeIndex) =>
-          buildPersonalMemoriesRouteSegments({
+          buildContextualPersonalMemoriesRouteSegments(routeContext, {
             action: "range",
             locale,
             category: "global",
@@ -496,30 +593,32 @@ ${localizer(locale, "commands.personal.memories.selector_guidance")}`,
     }
 
     if (selectedMemory) {
-      const bottomComponents: ComponentInContainerData[] = [
-        { type: ComponentType.Separator, divider: true, spacing: 1 },
-        {
-          type: ComponentType.TextDisplay,
-          content: `**${localizer(locale, "commands.personal.memories.stm_title")}**
-> ${localizer(locale, "commands.personal.memories.stm_active_count", { count: input.stmCount })}`,
-        },
-        {
-          type: ComponentType.ActionRow,
-          components: [
+      const bottomComponents: ComponentInContainerData[] = admin
+        ? []
+        : [
+            { type: ComponentType.Separator, divider: true, spacing: 1 },
             {
-              type: ComponentType.Button,
-              style: ButtonStyle.Secondary,
-              customId: buildPersonalMemoriesRouteId({ action: "stm-clear", locale, category: "global", lineageId: 0 }),
-              label: localizer(locale, "commands.personal.memories.stm_clear_button"),
-              disabled: writesDisabled,
+              type: ComponentType.TextDisplay,
+              content: `**${localizer(locale, "commands.personal.memories.stm_title")}**
+> ${localizer(locale, "commands.personal.memories.stm_active_count", { count: input.stmCount })}`,
             },
-          ],
-        },
-        {
-          type: ComponentType.TextDisplay,
-          content: withLinePrefix("-# ", localizer(locale, "commands.personal.memories.stm_crossserver_hint")),
-        },
-      ];
+            {
+              type: ComponentType.ActionRow,
+              components: [
+                {
+                  type: ComponentType.Button,
+                  style: ButtonStyle.Secondary,
+                  customId: routeId({ action: "stm-clear", locale, category: "global", lineageId: 0 }),
+                  label: localizer(locale, "commands.personal.memories.stm_clear_button"),
+                  disabled: writesDisabled,
+                },
+              ],
+            },
+            {
+              type: ComponentType.TextDisplay,
+              content: withLinePrefix("-# ", localizer(locale, "commands.personal.memories.stm_crossserver_hint")),
+            },
+          ];
       const staleComponent =
         readStatus === "stale"
           ? [
@@ -553,7 +652,7 @@ ${localizer(locale, "commands.personal.memories.selector_guidance")}`,
         {
           type: ComponentType.Button,
           style: ButtonStyle.Secondary,
-          customId: buildPersonalMemoriesRouteId({
+          customId: routeId({
             action: "edit-open",
             locale,
             category: "global",
@@ -566,7 +665,7 @@ ${localizer(locale, "commands.personal.memories.selector_guidance")}`,
         {
           type: ComponentType.Button,
           style: ButtonStyle.Danger,
-          customId: buildPersonalMemoriesRouteId({
+          customId: routeId({
             action: "remove-prompt",
             locale,
             category: "global",
@@ -579,30 +678,32 @@ ${localizer(locale, "commands.personal.memories.selector_guidance")}`,
       ],
     });
 
-    components.push(
-      { type: ComponentType.Separator, divider: true, spacing: 1 },
-      {
-        type: ComponentType.TextDisplay,
-        content: `**${localizer(locale, "commands.personal.memories.stm_title")}**
+    if (!admin) {
+      components.push(
+        { type: ComponentType.Separator, divider: true, spacing: 1 },
+        {
+          type: ComponentType.TextDisplay,
+          content: `**${localizer(locale, "commands.personal.memories.stm_title")}**
 > ${localizer(locale, "commands.personal.memories.stm_active_count", { count: input.stmCount })}`,
-      },
-      {
-        type: ComponentType.ActionRow,
-        components: [
-          {
-            type: ComponentType.Button,
-            style: ButtonStyle.Secondary,
-            customId: buildPersonalMemoriesRouteId({ action: "stm-clear", locale, category: "global", lineageId: 0 }),
-            label: localizer(locale, "commands.personal.memories.stm_clear_button"),
-            disabled: writesDisabled,
-          },
-        ],
-      },
-      {
-        type: ComponentType.TextDisplay,
-        content: withLinePrefix("-# ", localizer(locale, "commands.personal.memories.stm_crossserver_hint")),
-      },
-    );
+        },
+        {
+          type: ComponentType.ActionRow,
+          components: [
+            {
+              type: ComponentType.Button,
+              style: ButtonStyle.Secondary,
+              customId: routeId({ action: "stm-clear", locale, category: "global", lineageId: 0 }),
+              label: localizer(locale, "commands.personal.memories.stm_clear_button"),
+              disabled: writesDisabled,
+            },
+          ],
+        },
+        {
+          type: ComponentType.TextDisplay,
+          content: withLinePrefix("-# ", localizer(locale, "commands.personal.memories.stm_crossserver_hint")),
+        },
+      );
+    }
   } else {
     // Persona category
     const personaHeading: TextDisplayComponentData = {
@@ -612,12 +713,12 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
     };
     const personaHeadingSection = buildOptionalThumbnailSection(personaHeading, selectedPersonaAvatarUrl);
 
-    if (personas.length === 0) {
+    if (personas.length === 0 && extraLineages.length === 0) {
       components.push(personaHeadingSection);
       if (isPrivacyFull) {
         components.push({
           type: ComponentType.TextDisplay,
-          content: withLinePrefix("> ", `⚠️ ${localizer(locale, "commands.personal.memories.privacy_full_warning")}`),
+          content: withLinePrefix("> ", `⚠️ ${localizer(locale, privacyWarningKey)}`),
         });
       }
       components.push({
@@ -637,6 +738,13 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
         else personasByLineage.set(lineage, [p]);
       }
 
+      const extraNicknames = new Map<number, string | null>();
+      for (const extra of extraLineages) {
+        if (personasByLineage.has(extra.lineageId)) continue;
+        personasByLineage.set(extra.lineageId, []);
+        extraNicknames.set(extra.lineageId, extra.nickname);
+      }
+
       const lineageEntries = [...personasByLineage.entries()];
       const selectedLineagePosition = lineageEntries.findIndex(([lineage]) => lineage === selectedLineageId);
       const requestedPersonaRangeIndex = page.kind === "main" ? page.personaRangeIndex : undefined;
@@ -654,12 +762,15 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
         const representative = personaRepresentativeForLineage(sharing, lineage);
         return {
           label: safeSelectOptionText(
-            representative?.persona_nickname || localizer(locale, "commands.personal.memories.persona_default_name"),
+            representative?.persona_nickname ||
+              extraNicknames.get(lineage) ||
+              localizer(locale, "commands.personal.memories.persona_default_name"),
             100,
           ),
           value: String(lineage),
           description: safeSelectOptionText(
-            describeLineageMemories(locale, memoryCountsByLineage?.get(lineage) ?? 0, sharing.length),
+            // An extra lineage has no persona here but still names one persona elsewhere.
+            describeLineageMemories(locale, memoryCountsByLineage?.get(lineage) ?? 0, Math.max(1, sharing.length)),
             100,
           ),
           default: lineage === selectedLineageId,
@@ -671,7 +782,7 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
         components: [
           {
             type: ComponentType.StringSelect,
-            customId: buildPersonalMemoriesRouteId({
+            customId: routeId({
               action: "persona-select",
               locale,
               category: "persona",
@@ -688,11 +799,11 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
         locale,
         rangeIndex: personaRangeSelection.rangeIndex,
         rangeCount: personaRangeSelection.rangeCount,
-        namespace: PERSONAL_MEMORIES_ROUTE_NAMESPACE,
-        version: PERSONAL_MEMORIES_ROUTE_VERSION,
+        namespace: routeContext.namespace,
+        version: routeContext.version,
         buildSegments: {
           page: (rangeIndex) =>
-            buildPersonalMemoriesRouteSegments({
+            buildContextualPersonalMemoriesRouteSegments(routeContext, {
               action: "persona-page",
               locale,
               category: "persona",
@@ -710,7 +821,7 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
       if (isPrivacyFull) {
         components.push({
           type: ComponentType.TextDisplay,
-          content: withLinePrefix("> ", `⚠️ ${localizer(locale, "commands.personal.memories.privacy_full_warning")}`),
+          content: withLinePrefix("> ", `⚠️ ${localizer(locale, privacyWarningKey)}`),
         });
       }
 
@@ -741,7 +852,7 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
         components: [
           {
             type: ComponentType.StringSelect,
-            customId: buildPersonalMemoriesRouteId({
+            customId: routeId({
               action: "select",
               locale,
               category: "persona",
@@ -749,22 +860,22 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
               rangeIndex: rangeSelection.rangeIndex,
             }),
             placeholder: localizer(locale, "commands.personal.memories.select_placeholder"),
-            options: [addOption, ...memoryOptions],
+            options: admin ? memoryOptions : [addOption, ...memoryOptions],
             disabled: writesDisabled,
           },
         ],
       };
-      components.push(selectRow);
+      if (selectRow.components[0]?.options?.length) components.push(selectRow);
 
       const memoryPaginationRow = buildPaginationRow({
         locale,
         rangeIndex: rangeSelection.rangeIndex,
         rangeCount: rangeSelection.rangeCount,
-        namespace: PERSONAL_MEMORIES_ROUTE_NAMESPACE,
-        version: PERSONAL_MEMORIES_ROUTE_VERSION,
+        namespace: routeContext.namespace,
+        version: routeContext.version,
         buildSegments: {
           page: (rangeIndex) =>
-            buildPersonalMemoriesRouteSegments({
+            buildContextualPersonalMemoriesRouteSegments(routeContext, {
               action: "range",
               locale,
               category: "persona",
@@ -823,7 +934,7 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
           {
             type: ComponentType.Button,
             style: ButtonStyle.Secondary,
-            customId: buildPersonalMemoriesRouteId({
+            customId: routeId({
               action: "edit-open",
               locale,
               category: "persona",
@@ -836,7 +947,7 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
           {
             type: ComponentType.Button,
             style: ButtonStyle.Danger,
-            customId: buildPersonalMemoriesRouteId({
+            customId: routeId({
               action: "remove-prompt",
               locale,
               category: "persona",
@@ -851,9 +962,26 @@ ${localizer(locale, "commands.personal.memories.persona_description")}`,
     }
   }
 
+  if (canManageMembers && !admin) {
+    components.push(
+      { type: ComponentType.Separator, divider: true, spacing: 1 },
+      {
+        type: ComponentType.ActionRow,
+        components: [
+          {
+            type: ComponentType.Button,
+            style: ButtonStyle.Secondary,
+            customId: routeId({ action: "admin-open", locale }),
+            label: localizer(locale, "commands.personal.memories.admin_open_button"),
+          },
+        ],
+      },
+    );
+  }
+
   if (readStatus === "stale") {
     components.push(
-      buildRetryRow(locale, category, selectedLineageId),
+      buildRetryRow(locale, category, selectedLineageId, routeContext),
       { type: ComponentType.Separator, divider: true, spacing: 1 },
       {
         type: ComponentType.TextDisplay,

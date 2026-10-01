@@ -13,6 +13,7 @@ import type {
 import { ComponentType } from "discord.js";
 import { PrivacyLevel, type PersonalMemoryRow, type TomoriState } from "@/types/db/schema";
 import {
+  createPersonalMemoriesAdminInteractionRoute,
   createPersonalMemoriesInteractionRoute,
   personalMemoriesOperations,
   type PersonalMemoriesOperations,
@@ -21,8 +22,11 @@ import {
 import { personalMemoryRepository, userRepository } from "@/utils/db/repositories";
 import type { APIAttachment } from "discord.js";
 import {
+  adminPersonalMemoriesRouteContext,
+  buildContextualPersonalMemoriesRouteId,
   buildPersonalMemoriesRouteId,
   buildPersonalMemoriesRouteSegments,
+  parsePersonalMemoriesAdminRoute,
   parsePersonalMemoriesPanelRoute,
   PERSONAL_MEMORIES_ROUTE_CODECS,
   PERSONAL_MEMORIES_ROUTE_NAMESPACE,
@@ -115,6 +119,8 @@ const WIRE_CONTRACT_V1: ReadonlyArray<readonly [string, PersonalMemoriesPanelRou
     "personal-memories:v1:refresh:en-US:global:0",
     { action: "refresh", locale: "en-US", category: "global", lineageId: 0 },
   ],
+  ["personal-memories:v1:admin-open:en-US", { action: "admin-open", locale: "en-US" }],
+  ["personal-memories:v1:admin-pick:en-US", { action: "admin-pick", locale: "en-US" }],
 ];
 
 function requireRoute(customId: string): ParsedInteractionRoute {
@@ -247,6 +253,22 @@ function makeDependencies(
       }
       return counts;
     },
+    resolveAdminScope: async (_interaction, targetDiscId) => {
+      calls.push(`resolveAdminScope:${targetDiscId}`);
+      return {
+        userId: 7,
+        userDiscId: targetDiscId,
+        guildId: "987654321",
+        workspaceId: "987654321",
+        internalServerId: 42,
+        privacyLevel: PrivacyLevel.MINIMAL,
+        personas: [makePersona(1, 10, "Tomori")],
+        readStatus: "fresh",
+        admin: { targetDiscId, targetName: "target-member", targetAvatarUrl: null },
+        extraLineages: [{ lineageId: 30, nickname: "Elsewhere" }],
+      };
+    },
+    isBotOwner: () => false,
     getPersonaAvatarData: async (_interaction, persona) => {
       calls.push(`getPersonaAvatarData:${persona.persona_id}`);
       return { url: `https://cdn.example.invalid/${persona.persona_id}.png`, files: [] };
@@ -290,9 +312,11 @@ describe("personal-memories panel route catalog", () => {
     }
   });
 
-  it("guarantees 17-action exhaustiveness across catalog, accepted actions, wire contract, and route handler comparisons", () => {
-    const ACCEPTED_17_ACTIONS = [
+  it("guarantees 19-action exhaustiveness across catalog, accepted actions, wire contract, and route handler comparisons", () => {
+    const ACCEPTED_19_ACTIONS = [
       "add-submit",
+      "admin-open",
+      "admin-pick",
       "category",
       "edit-open",
       "edit-submit",
@@ -320,21 +344,23 @@ describe("personal-memories panel route catalog", () => {
     );
     const handlerActions = new Set([...routesSource.matchAll(/route\.action === "([a-z0-9-]+)"/g)].map((m) => m[1]));
 
-    expect(wireActions).toEqual(ACCEPTED_17_ACTIONS);
-    expect(codecTableActions).toEqual(ACCEPTED_17_ACTIONS);
+    expect(wireActions).toEqual(ACCEPTED_19_ACTIONS);
+    expect(codecTableActions).toEqual(ACCEPTED_19_ACTIONS);
 
-    expect(handlerActions.size).toBe(17);
-    expect([...handlerActions].sort()).toEqual(ACCEPTED_17_ACTIONS);
-    expect(ACCEPTED_17_ACTIONS.filter((a) => !handlerActions.has(a))).toEqual([]);
-    expect([...handlerActions].filter((a) => !ACCEPTED_17_ACTIONS.includes(a))).toEqual([]);
+    expect(handlerActions.size).toBe(19);
+    expect([...handlerActions].sort()).toEqual(ACCEPTED_19_ACTIONS);
+    expect(ACCEPTED_19_ACTIONS.filter((a) => !handlerActions.has(a))).toEqual([]);
+    expect([...handlerActions].filter((a) => !ACCEPTED_19_ACTIONS.includes(a))).toEqual([]);
     expect(codecTableActions.filter((a) => !handlerActions.has(a))).toEqual([]);
     expect([...handlerActions].filter((a) => !codecTableActions.includes(a))).toEqual([]);
   });
 
   it("guarantees producer coverage against production UI and modal surfaces with explicit allowlist for producerless actions", () => {
     const PRODUCERLESS_ACTIONS = ["range-cancel", "range-open", "range-page", "refresh"] as const;
-    const ACCEPTED_17_ACTIONS = [
+    const ACCEPTED_19_ACTIONS = [
       "add-submit",
+      "admin-open",
+      "admin-pick",
       "category",
       "edit-open",
       "edit-submit",
@@ -522,6 +548,37 @@ describe("personal-memories panel route catalog", () => {
       }),
     );
 
+    // Bot owner's own panel (produces admin-open)
+    harvestCustomIds(
+      buildPersonalMemoriesPanelPayload({
+        locale: "en-US",
+        category: "global",
+        selectedLineageId: 0,
+        personas: samplePersonas,
+        memories: sampleMemories,
+        stmCount: 1,
+        privacyLevel: PrivacyLevel.MINIMAL,
+        readStatus: "fresh",
+        page: { kind: "main" },
+        canManageMembers: true,
+      }),
+    );
+
+    // Member picker (produces admin-pick)
+    harvestCustomIds(
+      buildPersonalMemoriesPanelPayload({
+        locale: "en-US",
+        category: "global",
+        selectedLineageId: 0,
+        personas: samplePersonas,
+        memories: [],
+        stmCount: 0,
+        privacyLevel: PrivacyLevel.MINIMAL,
+        readStatus: "fresh",
+        page: { kind: "admin-pick" },
+      }),
+    );
+
     // Add modal (produces add-submit)
     harvestCustomIds(buildAddPersonalMemoryModal("en-US", "global", 0, "12345678"));
 
@@ -547,7 +604,7 @@ describe("personal-memories panel route catalog", () => {
     }
 
     const unionedActions = [...new Set([...producedActions, ...PRODUCERLESS_ACTIONS])].sort();
-    expect(unionedActions).toEqual(ACCEPTED_17_ACTIONS);
+    expect(unionedActions).toEqual(ACCEPTED_19_ACTIONS);
   });
 
   it("distinguishes presence and absence of optional select.rangeIndex", () => {
@@ -1011,6 +1068,9 @@ describe("personal-memories panel route catalog", () => {
     for (const route of maxRoutes) {
       const customId = buildPersonalMemoriesRouteId(route);
       expect(customId.length).toBeLessThanOrEqual(100);
+      // Admin mode prefixes a snowflake; 20 digits is the longest a snowflake gets.
+      const adminId = buildContextualPersonalMemoriesRouteId(adminPersonalMemoriesRouteContext("9".repeat(20)), route);
+      expect(adminId.length).toBeLessThanOrEqual(100);
     }
   });
 
@@ -1916,5 +1976,231 @@ describe("Add Memory batch upload", () => {
     ) as { component: { required: boolean } } | undefined;
     // Optional so a file alone is a valid submission; the handler rejects both being empty.
     expect(contentWrapper?.component.required).toBeFalse();
+  });
+});
+
+describe("bot-owner admin mode", () => {
+  const OWNER_ID = "123456789";
+  const TARGET_ID = "111111111111111111";
+
+  function adminId(route: PersonalMemoriesPanelRoute): string {
+    return buildContextualPersonalMemoriesRouteId(adminPersonalMemoriesRouteContext(TARGET_ID), route);
+  }
+
+  function makeButton(customId: string, overrides: Record<string, unknown> = {}) {
+    const captured: { reply?: InteractionReplyOptions; payload?: unknown; deferred: boolean } = { deferred: false };
+    const interaction = {
+      id: `admin-${customId}`,
+      customId,
+      user: { id: OWNER_ID, displayAvatarURL: () => "https://cdn.example.invalid/avatar.png" },
+      guildId: "987654321",
+      isButton: () => true,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      reply: async (value: InteractionReplyOptions) => {
+        captured.reply = value;
+      },
+      deferUpdate: async () => {
+        captured.deferred = true;
+      },
+      editReply: async (value: unknown) => {
+        captured.payload = value;
+      },
+      ...overrides,
+    };
+    return { interaction, captured };
+  }
+
+  it("parses admin IDs to the target and the ordinary route, and rejects a malformed target", () => {
+    const customId = adminId({
+      action: "remove-confirm",
+      locale: "en-US",
+      category: "global",
+      lineageId: 0,
+      memoryId: 5,
+    });
+    expect(customId).toBe(`pm-admin:v1:${TARGET_ID}:remove-confirm:en-US:global:0:5`);
+    expect(parsePersonalMemoriesAdminRoute(requireRoute(customId))).toEqual({
+      targetDiscId: TARGET_ID,
+      route: { action: "remove-confirm", locale: "en-US", category: "global", lineageId: 0, memoryId: 5 },
+    });
+    expect(
+      parsePersonalMemoriesAdminRoute(requireRoute("pm-admin:v1:not-a-snowflake:remove-confirm:en-US:global:0:5")),
+    ).toBeNull();
+    // An admin ID never parses as the invoker's own panel.
+    expect(parsePersonalMemoriesPanelRoute(requireRoute(customId))).toBeNull();
+  });
+
+  it("denies a non-owner replaying an admin ID before loading the target or writing", async () => {
+    const calls: string[] = [];
+    const { dependencies, telemetry } = makeDependencies(calls);
+    const route = createPersonalMemoriesAdminInteractionRoute(dependencies);
+    const customId = adminId({
+      action: "remove-confirm",
+      locale: "en-US",
+      category: "global",
+      lineageId: 0,
+      memoryId: 1,
+    });
+    const { interaction, captured } = makeButton(customId);
+
+    await route.execute({} as Client, interaction as never, requireRoute(customId));
+
+    expect(captured.reply?.content).toBe(localizer("en-US", "commands.personal.memories.admin_denied"));
+    expect(calls.some((call) => call.startsWith("resolveAdminScope") || call.startsWith("remove:"))).toBe(false);
+    expect(telemetry).toBeEmpty();
+  });
+
+  it("denies a non-owner opening the member picker from their own panel", async () => {
+    const calls: string[] = [];
+    const { dependencies } = makeDependencies(calls);
+    const route = createPersonalMemoriesInteractionRoute(dependencies);
+    const customId = buildPersonalMemoriesRouteId({ action: "admin-open", locale: "en-US" });
+    const { interaction, captured } = makeButton(customId);
+
+    await route.execute({} as Client, interaction as never, requireRoute(customId));
+
+    expect(captured.reply?.content).toBe(localizer("en-US", "commands.personal.memories.admin_denied"));
+    expect(captured.payload).toBeUndefined();
+  });
+
+  it("lets an owner remove the target's memory, scoped to the target and tagged as an admin action", async () => {
+    const calls: string[] = [];
+    const removed: Array<{ userId: number; userDiscId: string; memoryId: number }> = [];
+    const { dependencies, telemetry, memories } = makeDependencies(calls, { isBotOwner: (id) => id === OWNER_ID });
+    dependencies.operations = {
+      ...dependencies.operations,
+      remove: async (input) => {
+        removed.push({ userId: input.userId, userDiscId: input.userDiscId, memoryId: input.memoryId });
+        const row = memories.find((memory) => memory.personal_memory_id === input.memoryId);
+        return row ? { status: "success", row } : { status: "not-found" };
+      },
+    };
+    const route = createPersonalMemoriesAdminInteractionRoute(dependencies);
+    const customId = adminId({
+      action: "remove-confirm",
+      locale: "en-US",
+      category: "global",
+      lineageId: 0,
+      memoryId: 1,
+    });
+    const { interaction, captured } = makeButton(customId);
+
+    await route.execute({} as Client, interaction as never, requireRoute(customId));
+
+    expect(captured.deferred).toBe(true);
+    expect(removed).toEqual([{ userId: 7, userDiscId: TARGET_ID, memoryId: 1 }]);
+    expect(telemetry).toEqual(["personal-memories.personal.admin-memory.remove"]);
+    // The repainted panel stays in admin mode.
+    expect(JSON.stringify(captured.payload)).toContain(`pm-admin:v1:${TARGET_ID}:`);
+  });
+
+  it("refuses add, batch add, and STM clearing in admin mode even for an owner", async () => {
+    const calls: string[] = [];
+    const { dependencies } = makeDependencies(calls, { isBotOwner: () => true });
+    const route = createPersonalMemoriesAdminInteractionRoute(dependencies);
+    const unavailable = localizer("en-US", "commands.personal.memories.admin_action_unavailable");
+
+    const stmId = adminId({ action: "stm-clear", locale: "en-US", category: "global", lineageId: 0 });
+    const stm = makeButton(stmId);
+    await route.execute({} as Client, stm.interaction as never, requireRoute(stmId));
+    expect(stm.captured.reply?.content).toBe(unavailable);
+
+    const selectId = adminId({ action: "select", locale: "en-US", category: "global", lineageId: 0 });
+    const select = makeButton(selectId, {
+      values: ["action:add"],
+      isButton: () => false,
+      isStringSelectMenu: () => true,
+    });
+    await route.execute({} as Client, select.interaction as never, requireRoute(selectId));
+    expect(select.captured.reply?.content).toBe(unavailable);
+
+    expect(calls).not.toContain("showAddModal");
+    expect(calls.some((call) => call.startsWith("clearStm") || call.startsWith("add"))).toBe(false);
+  });
+
+  it("blocks editing an opted-out member with admin wording, while removal stays available", async () => {
+    const calls: string[] = [];
+    const { dependencies } = makeDependencies(calls, { isBotOwner: () => true });
+    const baseResolve = dependencies.resolveAdminScope;
+    dependencies.resolveAdminScope = async (interaction, target) => {
+      const scope = await baseResolve(interaction, target);
+      return scope ? { ...scope, privacyLevel: PrivacyLevel.FULL } : null;
+    };
+    const route = createPersonalMemoriesAdminInteractionRoute(dependencies);
+    const customId = adminId({ action: "edit-open", locale: "en-US", category: "global", lineageId: 0, memoryId: 1 });
+    const { interaction, captured } = makeButton(customId);
+
+    await route.execute({} as Client, interaction as never, requireRoute(customId));
+
+    expect(captured.reply?.content).toBe(localizer("en-US", "commands.personal.memories.admin_privacy_blocked"));
+    expect(calls).not.toContain("showEditModal");
+  });
+
+  it("switches an owner into admin mode from the picker, and reports an unknown member on their own panel", async () => {
+    const calls: string[] = [];
+    const { dependencies } = makeDependencies(calls, { isBotOwner: () => true });
+    const route = createPersonalMemoriesInteractionRoute(dependencies);
+    const customId = buildPersonalMemoriesRouteId({ action: "admin-pick", locale: "en-US" });
+
+    const known = makeButton(customId, { values: [TARGET_ID], isButton: () => false });
+    await route.execute({} as Client, known.interaction as never, requireRoute(customId));
+    const knownPayload = JSON.stringify(known.captured.payload);
+    expect(calls).toContain(`resolveAdminScope:${TARGET_ID}`);
+    expect(knownPayload).toContain(`pm-admin:v1:${TARGET_ID}:`);
+    expect(knownPayload).toContain("target-member");
+    expect(knownPayload).not.toContain("action:add");
+
+    const unknownDependencies = makeDependencies([], {
+      isBotOwner: () => true,
+      resolveAdminScope: async () => null,
+    }).dependencies;
+    const unknownRoute = createPersonalMemoriesInteractionRoute(unknownDependencies);
+    const unknown = makeButton(customId, { values: ["222222222222222222"], isButton: () => false });
+    await unknownRoute.execute({} as Client, unknown.interaction as never, requireRoute(customId));
+    const unknownPayload = JSON.stringify(unknown.captured.payload);
+    expect(unknownPayload).toContain(localizer("en-US", "commands.personal.memories.admin_target_unknown_heading"));
+    expect(unknownPayload).not.toContain("pm-admin:");
+  });
+
+  it("renders admin mode without add or STM controls, and lists the target's lineages from other servers", () => {
+    const payload = buildPersonalMemoriesPanelPayload({
+      locale: "en-US",
+      category: "persona",
+      selectedLineageId: 10,
+      personas: [makePersona(1, 10, "Tomori")],
+      memories: [makeMemory(3, { persona_lineage_id: 10 })],
+      stmCount: 0,
+      privacyLevel: PrivacyLevel.MINIMAL,
+      readStatus: "fresh",
+      page: { kind: "main" },
+      routeContext: adminPersonalMemoriesRouteContext(TARGET_ID),
+      admin: { targetName: "target-member" },
+      canManageMembers: true,
+      extraLineages: [{ lineageId: 30, nickname: "Elsewhere" }],
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("action:add");
+    expect(serialized).not.toContain(":stm-clear:");
+    // The owner entry belongs to the owner's own panel, not to admin mode.
+    expect(serialized).not.toContain(":admin-open:");
+    const personaSelect = collectSelects(payload).find((select) => select.customId?.includes(":persona-select:"));
+    expect(personaSelect?.options?.map((option) => option.label)).toEqual(["Tomori", "Elsewhere"]);
+
+    // With no memories, admin mode has no options at all, and Discord rejects an empty select.
+    const empty = buildPersonalMemoriesPanelPayload({
+      locale: "en-US",
+      category: "global",
+      selectedLineageId: 0,
+      personas: [],
+      memories: [],
+      stmCount: 0,
+      privacyLevel: PrivacyLevel.MINIMAL,
+      readStatus: "fresh",
+      page: { kind: "main" },
+      routeContext: adminPersonalMemoriesRouteContext(TARGET_ID),
+      admin: { targetName: "target-member" },
+    });
+    expect(collectSelects(empty).filter((select) => select.customId?.includes(":select:"))).toEqual([]);
   });
 });

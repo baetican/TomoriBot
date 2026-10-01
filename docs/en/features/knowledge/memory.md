@@ -223,6 +223,8 @@ and refreshes as the conversation moves along. It fades on its own after a few q
 
 Anyone can run `/config` > Persona > Memories, `/personal config`, and `/personal memories`. The rest need Manage Server.
 
+Bot owners (set by the host in `BOT_OWNER_IDS`) also see a **Manage a member** button in `/personal memories`. It opens another member's personal memories so the owner can edit or remove them, for example to retcon a roleplay. Members who set their privacy level to Full can have memories removed but not edited.
+
 ### STM Configuration
 
 Workspace managers can tune short-term memory from `/config` → `Behavior` → `Memory & STM`.

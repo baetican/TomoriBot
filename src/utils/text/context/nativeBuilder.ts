@@ -118,7 +118,7 @@ export async function buildContextNative(params: BuildContextParams): Promise<Na
   let nudgeInjectionDepth = 2;
   let memoryInjectionItems: StructuredContextItem[] | undefined;
   let memoryInjectionDepth = -1;
-  // Raw (unformatted) memory content resolved earlier in this pipeline — reused as
+  // Raw (unformatted) memory content resolved earlier in this pipeline, reused as
   // the RAG memory-lane query text so document retrieval doesn't need its own pass.
   const memoryLaneTexts: string[] = [];
   let uncensorDirective: string | undefined;

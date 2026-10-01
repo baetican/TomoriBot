@@ -60,6 +60,8 @@ export const PANEL_ACTIONS = [
   "personal-memories.personal.memory.edit",
   "personal-memories.personal.memory.remove",
   "personal-memories.personal.stm.clear",
+  "personal-memories.personal.admin-memory.edit",
+  "personal-memories.personal.admin-memory.remove",
 
   // memories (workspace)
   "memories.workspace.memory.add",

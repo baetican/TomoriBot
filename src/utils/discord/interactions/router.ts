@@ -5,7 +5,10 @@ import { helpInteractionRoute } from "@/utils/discord/interactions/helpRoutes";
 import { memoriesInteractionRoute } from "@/utils/discord/interactions/memoriesRoutes";
 import { moderationInteractionRoute } from "@/utils/discord/interactions/moderationRoutes";
 import { personalConfigInteractionRoute } from "@/utils/discord/interactions/personalConfigRoutes";
-import { personalMemoriesInteractionRoute } from "@/utils/discord/interactions/personalMemoriesRoutes";
+import {
+  personalMemoriesAdminInteractionRoute,
+  personalMemoriesInteractionRoute,
+} from "@/utils/discord/interactions/personalMemoriesRoutes";
 import {
   personalProvidersInteractionRoute,
   providersInteractionRoute,
@@ -28,6 +31,7 @@ const registry = new InteractionRouteRegistry([
   moderationInteractionRoute,
   personalConfigInteractionRoute,
   personalMemoriesInteractionRoute,
+  personalMemoriesAdminInteractionRoute,
   personalProvidersInteractionRoute,
   providersInteractionRoute,
   setupInteractionRoute,

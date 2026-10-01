@@ -6,6 +6,7 @@ import {
   parseNonNegativeInt,
   parseNonce,
   parsePositiveId,
+  parseSnowflake,
   type RouteCodec,
   type RouteFieldCodec,
 } from "@/utils/discord/panelRouteCodec";
@@ -13,6 +14,13 @@ import { parseLocale } from "@/utils/discord/panelRouteTokens";
 
 export const PERSONAL_MEMORIES_ROUTE_NAMESPACE = "personal-memories";
 export const PERSONAL_MEMORIES_ROUTE_VERSION = "v1";
+/**
+ * Bot-owner admin mode: the same panel scoped to another member. Its custom IDs carry the target's
+ * snowflake ahead of the ordinary segments, and a separate namespace keeps them from ever parsing as
+ * the invoker's own panel.
+ */
+export const PERSONAL_MEMORIES_ADMIN_ROUTE_NAMESPACE = "pm-admin";
+export const PERSONAL_MEMORIES_ADMIN_ROUTE_VERSION = "v1";
 
 export type PersonalMemoriesCategory = "global" | "persona";
 
@@ -53,7 +61,8 @@ export type PersonalMemoriesPanelRoute =
       nonce: string;
     }
   | { action: "stm-clear"; locale: string; category: PersonalMemoriesCategory; lineageId: number }
-  | { action: "retry" | "refresh"; locale: string; category: PersonalMemoriesCategory; lineageId: number };
+  | { action: "retry" | "refresh"; locale: string; category: PersonalMemoriesCategory; lineageId: number }
+  | { action: "admin-open" | "admin-pick"; locale: string };
 
 type PersonalMemoriesAction = PersonalMemoriesPanelRoute["action"];
 
@@ -138,6 +147,14 @@ export const PERSONAL_MEMORIES_ROUTE_CODECS: PersonalMemoriesRouteCodecs = {
   "add-submit": {
     wireToken: "add-submit",
     fields: [categoryField, lineageIdField, nonceField],
+  },
+  "admin-open": {
+    wireToken: "admin-open",
+    fields: [],
+  },
+  "admin-pick": {
+    wireToken: "admin-pick",
+    fields: [],
   },
   category: {
     wireToken: "category",
@@ -227,12 +244,8 @@ export function buildPersonalMemoriesRouteId(route: PersonalMemoriesPanelRoute):
   );
 }
 
-export function parsePersonalMemoriesPanelRoute(route: ParsedInteractionRoute): PersonalMemoriesPanelRoute | null {
-  if (route.namespace !== PERSONAL_MEMORIES_ROUTE_NAMESPACE || route.version !== PERSONAL_MEMORIES_ROUTE_VERSION) {
-    return null;
-  }
-
-  const [rawWireToken, rawLocale, ...tail] = route.segments;
+function decodePersonalMemoriesSegments(segments: readonly string[]): PersonalMemoriesPanelRoute | null {
+  const [rawWireToken, rawLocale, ...tail] = segments;
   if (!rawWireToken || !rawLocale) return null;
 
   const locale = parseLocale(rawLocale);
@@ -242,4 +255,76 @@ export function parsePersonalMemoriesPanelRoute(route: ParsedInteractionRoute): 
   if (!entry) return null;
 
   return decodeRouteSegments(entry.codec, entry.action, locale, tail);
+}
+
+export function parsePersonalMemoriesPanelRoute(route: ParsedInteractionRoute): PersonalMemoriesPanelRoute | null {
+  if (route.namespace !== PERSONAL_MEMORIES_ROUTE_NAMESPACE || route.version !== PERSONAL_MEMORIES_ROUTE_VERSION) {
+    return null;
+  }
+  return decodePersonalMemoriesSegments(route.segments);
+}
+
+/**
+ * Where a panel's custom IDs point: the invoker's own panel, or admin mode for one target member.
+ * Pagination rows take the namespace, version, and segments separately, so the context is kept in
+ * parts rather than as a single ID builder.
+ */
+export interface PersonalMemoriesRouteContext {
+  namespace: string;
+  version: string;
+  prefixSegments: readonly string[];
+}
+
+export const SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT: PersonalMemoriesRouteContext = {
+  namespace: PERSONAL_MEMORIES_ROUTE_NAMESPACE,
+  version: PERSONAL_MEMORIES_ROUTE_VERSION,
+  prefixSegments: [],
+};
+
+export function adminPersonalMemoriesRouteContext(targetDiscId: string): PersonalMemoriesRouteContext {
+  return {
+    namespace: PERSONAL_MEMORIES_ADMIN_ROUTE_NAMESPACE,
+    version: PERSONAL_MEMORIES_ADMIN_ROUTE_VERSION,
+    prefixSegments: [targetDiscId],
+  };
+}
+
+/** Segments for a route under a context, prefix included, for callers that add the namespace themselves. */
+export function buildContextualPersonalMemoriesRouteSegments(
+  context: PersonalMemoriesRouteContext,
+  route: PersonalMemoriesPanelRoute,
+): string[] {
+  return [...context.prefixSegments, ...buildPersonalMemoriesRouteSegments(route)];
+}
+
+export function buildContextualPersonalMemoriesRouteId(
+  context: PersonalMemoriesRouteContext,
+  route: PersonalMemoriesPanelRoute,
+): string {
+  return buildInteractionRouteId(
+    context.namespace,
+    context.version,
+    ...buildContextualPersonalMemoriesRouteSegments(context, route),
+  );
+}
+
+/**
+ * Parses an admin-mode custom ID into the target member's snowflake and the ordinary route. The ID
+ * is client-supplied, so this establishes only what was asked for; the handler re-checks that the
+ * clicker is a bot owner on every interaction.
+ */
+export function parsePersonalMemoriesAdminRoute(
+  route: ParsedInteractionRoute,
+): { targetDiscId: string; route: PersonalMemoriesPanelRoute } | null {
+  if (
+    route.namespace !== PERSONAL_MEMORIES_ADMIN_ROUTE_NAMESPACE ||
+    route.version !== PERSONAL_MEMORIES_ADMIN_ROUTE_VERSION
+  ) {
+    return null;
+  }
+  const [rawTarget, ...segments] = route.segments;
+  const targetDiscId = parseSnowflake(rawTarget);
+  if (!targetDiscId) return null;
+  const decoded = decodePersonalMemoriesSegments(segments);
+  return decoded ? { targetDiscId, route: decoded } : null;
 }

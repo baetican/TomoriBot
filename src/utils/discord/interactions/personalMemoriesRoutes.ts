@@ -6,6 +6,7 @@ import {
   type InteractionEditReplyOptions,
   type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
+  type UserSelectMenuInteraction,
 } from "discord.js";
 import type { APIAttachment } from "discord.js";
 import { PrivacyLevel, type PersonalMemoryRow, type TomoriState } from "@/types/db/schema";
@@ -26,11 +27,19 @@ import {
 } from "@/utils/discord/interactions/panelController";
 import { createNonce } from "@/utils/discord/panelRouteTokens";
 import {
+  adminPersonalMemoriesRouteContext,
+  PERSONAL_MEMORIES_ADMIN_ROUTE_NAMESPACE,
+  PERSONAL_MEMORIES_ADMIN_ROUTE_VERSION,
   PERSONAL_MEMORIES_ROUTE_NAMESPACE,
   PERSONAL_MEMORIES_ROUTE_VERSION,
+  parsePersonalMemoriesAdminRoute,
   parsePersonalMemoriesPanelRoute,
+  SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT,
   type PersonalMemoriesCategory,
+  type PersonalMemoriesPanelRoute,
+  type PersonalMemoriesRouteContext,
 } from "@/utils/discord/personalMemoriesPanelCatalog";
+import { isBotOwner } from "@/utils/discord/ownerCheck";
 import {
   buildAddPersonalMemoryModal,
   buildEditPersonalMemoryModal,
@@ -82,6 +91,10 @@ interface PersonalMemoriesScope {
   privacyLevel: PrivacyLevel;
   personas: TomoriState[];
   readStatus: PanelReadStatus;
+  /** Bot-owner admin mode: the user fields above belong to this target member, not the invoker. */
+  admin?: { targetDiscId: string; targetName: string; targetAvatarUrl: string | null };
+  /** Admin mode: the target's memory lineages with no persona in this workspace. */
+  extraLineages?: Array<{ lineageId: number; nickname: string | null }>;
 }
 
 export interface PersonalMemoriesOperations {
@@ -132,6 +145,12 @@ export interface PersonalMemoriesRouteDependencies {
     interaction: GlobalRoutableInteraction | ChatInputCommandInteraction,
     forceRefresh?: boolean,
   ): Promise<PersonalMemoriesScope | null>;
+  /** Scope for another member in admin mode, or null when they have no user row. */
+  resolveAdminScope(
+    interaction: GlobalRoutableInteraction,
+    targetDiscId: string,
+  ): Promise<PersonalMemoriesScope | null>;
+  isBotOwner(discordUserId: string): boolean;
   loadMemories(userId: number, lineageId: number): Promise<PersonalMemoryRow[]>;
   getMemoryCountsByLineage(userId: number): Promise<Map<number, number>>;
   getPersonaAvatarData(
@@ -156,6 +175,7 @@ export interface PersonalMemoriesRouteDependencies {
     lineageId: number,
     memory: PersonalMemoryRow,
     nonce: string,
+    routeContext: PersonalMemoriesRouteContext,
   ): Promise<void>;
   takeFileUpload(interactionId: string, nonce: string): APIAttachment | undefined;
   // Injected because it performs network I/O, which is the same reason every other external effect
@@ -338,6 +358,71 @@ async function resolveScope(
   }
 }
 
+async function resolveAdminScope(
+  interaction: GlobalRoutableInteraction,
+  targetDiscId: string,
+): Promise<PersonalMemoriesScope | null> {
+  try {
+    // Never registers the target: admin mode only reaches members who already have a user row.
+    const targetRow = await userRepository.loadByDiscordId(targetDiscId);
+    if (!targetRow?.user_id) return null;
+
+    const workspaceId = interaction.guildId ?? interaction.user.id;
+    const [privacyLevel, internalServerId, lineages, workspacePersonas, targetUser] = await Promise.all([
+      userRepository.getPrivacyLevel(targetDiscId),
+      serverRepository.loadServerIdByDiscId(workspaceId),
+      personalMemoryRepository.destinationLineages(targetRow.user_id),
+      personaRepository.loadAllForServer(workspaceId).catch((error: unknown) => {
+        log.warn("Failed to load personas for personal memories admin scope", { workspaceId, error });
+        return [] as TomoriState[];
+      }),
+      interaction.client.users.fetch(targetDiscId).catch(() => null),
+    ]);
+
+    // Only lineages holding the target's memories matter: admin mode edits and removes, never adds.
+    const lineageIds = new Set(lineages.map((lineage) => lineage.lineageId));
+    const personas = workspacePersonas.filter(
+      (p) =>
+        p.persona_lineage_id !== undefined && p.persona_lineage_id !== null && lineageIds.has(p.persona_lineage_id),
+    );
+    const localLineageIds = new Set(personas.map((p) => p.persona_lineage_id));
+
+    return {
+      userId: targetRow.user_id,
+      userDiscId: targetDiscId,
+      guildId: interaction.guildId ?? null,
+      workspaceId,
+      internalServerId: internalServerId ?? null,
+      privacyLevel,
+      personas,
+      readStatus: "fresh",
+      admin: {
+        targetDiscId,
+        targetName: targetUser?.username ?? targetDiscId,
+        targetAvatarUrl: targetUser?.displayAvatarURL({ size: 256, extension: "png" }) ?? null,
+      },
+      extraLineages: lineages.filter((lineage) => !localLineageIds.has(lineage.lineageId)),
+    };
+  } catch (error) {
+    log.error("Failed to resolve admin scope for personal memories", error);
+    return null;
+  }
+}
+
+/** Every lineage the scope can show: workspace personas first, then admin-mode extra lineages. */
+function scopeLineageIds(scope: PersonalMemoriesScope): number[] {
+  const ids = scope.personas
+    .map((persona) => persona.persona_lineage_id)
+    .filter((id): id is number => typeof id === "number");
+  return [...ids, ...(scope.extraLineages ?? []).map((lineage) => lineage.lineageId)];
+}
+
+function scopeRouteContext(scope: PersonalMemoriesScope): PersonalMemoriesRouteContext {
+  return scope.admin
+    ? adminPersonalMemoriesRouteContext(scope.admin.targetDiscId)
+    : SELF_PERSONAL_MEMORIES_ROUTE_CONTEXT;
+}
+
 async function loadMemories(userId: number, lineageId: number): Promise<PersonalMemoryRow[]> {
   const rows = await personalMemoryRepository.loadForUserLineage(userId, lineageId, false);
   return lineageId === 0 ? rows : rows.filter((m) => m.persona_lineage_id === lineageId);
@@ -367,6 +452,7 @@ const ERROR_RECEIPT_KEYS = new Set([
   "batch_file_too_large",
   "batch_all_duplicates",
   "batch_limit_reached",
+  "admin_target_unknown",
 ]);
 
 function receipt(locale: string, key: string, variables?: Record<string, string | number>): PanelReceipt {
@@ -404,9 +490,12 @@ async function repaint(
   panelReceipt?: PanelReceipt,
   dependencies: PersonalMemoriesRouteDependencies = defaultDependencies,
 ): Promise<void> {
-  const stmCount = category === "global" ? await dependencies.getStmCount(scope.userDiscId) : 0;
+  const isPicker = page.kind === "admin-pick";
+  // Admin mode hides the STM section, so there is no count to fetch for another member.
+  const stmCount =
+    category === "global" && !scope.admin && !isPicker ? await dependencies.getStmCount(scope.userDiscId) : 0;
   const memoryCountsByLineage =
-    category === "persona" ? await dependencies.getMemoryCountsByLineage(scope.userId) : undefined;
+    category === "persona" && !isPicker ? await dependencies.getMemoryCountsByLineage(scope.userId) : undefined;
   const representative =
     category === "persona" ? personaRepresentativeForLineage(scope.personas, selectedLineageId) : null;
   const selectedPersonaAvatar = representative
@@ -423,12 +512,21 @@ async function repaint(
         memories,
         memoryCountsByLineage,
         selectedPersonaAvatarUrl: selectedPersonaAvatar?.url,
-        userAvatarUrl: category === "global" ? resolveInvokerAvatarUrl(interaction) : undefined,
+        userAvatarUrl:
+          category === "global"
+            ? scope.admin
+              ? scope.admin.targetAvatarUrl
+              : resolveInvokerAvatarUrl(interaction)
+            : undefined,
         stmCount,
         privacyLevel: scope.privacyLevel,
         readStatus: scope.readStatus,
         page,
         receipt: panelReceipt,
+        routeContext: scopeRouteContext(scope),
+        admin: scope.admin ? { targetName: scope.admin.targetName } : undefined,
+        canManageMembers: !scope.admin && dependencies.isBotOwner(interaction.user.id),
+        extraLineages: scope.extraLineages,
       }),
       selectedPersonaAvatar,
     ),
@@ -438,6 +536,8 @@ async function repaint(
 
 const defaultDependencies: PersonalMemoriesRouteDependencies = {
   resolveScope,
+  resolveAdminScope,
+  isBotOwner,
   loadMemories,
   getMemoryCountsByLineage,
   getPersonaAvatarData: resolvePersonaPanelAvatar,
@@ -452,7 +552,7 @@ const defaultDependencies: PersonalMemoriesRouteDependencies = {
   takeFileUpload: (interactionId, nonce) =>
     takeRawModalFileUpload(interactionId, buildPersonalMemoryModalFieldId("file", nonce)),
   readUploadedText: readTxtUpload,
-  showEditModal: (interaction, locale, category, lineageId, memory, nonce) =>
+  showEditModal: (interaction, locale, category, lineageId, memory, nonce, routeContext) =>
     showRoutedRawModal(
       interaction,
       buildEditPersonalMemoryModal(
@@ -463,9 +563,726 @@ const defaultDependencies: PersonalMemoriesRouteDependencies = {
         memory.content,
         memory.tags ?? [],
         nonce,
+        routeContext,
       ),
     ),
 };
+
+/** Actions admin mode never performs: it edits and removes another member's memories, nothing else. */
+const ADMIN_UNAVAILABLE_ACTIONS = new Set<PersonalMemoriesPanelRoute["action"]>([
+  "add-submit",
+  "stm-clear",
+  "admin-open",
+  "admin-pick",
+]);
+
+async function replyEphemeral(interaction: GlobalRoutableInteraction, locale: string, key: string): Promise<void> {
+  await interaction.reply({ content: localizer(locale, key), flags: MessageFlags.Ephemeral });
+}
+
+/**
+ * Handles one personal-memories interaction for the invoker's own panel (`adminTargetDiscId` null)
+ * or for bot-owner admin mode over another member.
+ */
+async function executePersonalMemoriesRoute(
+  dependencies: PersonalMemoriesRouteDependencies,
+  interaction: GlobalRoutableInteraction,
+  route: PersonalMemoriesPanelRoute,
+  adminTargetDiscId: string | null,
+): Promise<void> {
+  // Admin custom IDs are client-supplied and can be replayed, so ownership is re-checked on every
+  // interaction rather than trusted from the panel that produced them.
+  if (adminTargetDiscId !== null || route.action === "admin-open" || route.action === "admin-pick") {
+    if (!dependencies.isBotOwner(interaction.user.id)) {
+      log.warn(`Non-owner ${interaction.user.id} attempted personal memories admin action '${route.action}'`);
+      await replyEphemeral(interaction, route.locale, "commands.personal.memories.admin_denied");
+      return;
+    }
+  }
+  if (adminTargetDiscId !== null && ADMIN_UNAVAILABLE_ACTIONS.has(route.action)) {
+    await replyEphemeral(interaction, route.locale, "commands.personal.memories.admin_action_unavailable");
+    return;
+  }
+
+  const loadScope = (forceRefresh: boolean): Promise<PersonalMemoriesScope | null> =>
+    adminTargetDiscId === null
+      ? dependencies.resolveScope(interaction, forceRefresh)
+      : dependencies.resolveAdminScope(interaction, adminTargetDiscId);
+
+  // Modals and modal-opening select choices handle their own acknowledgement
+  if (route.action === "select") {
+    if (!interaction.isStringSelectMenu()) {
+      throw new Error("Personal memories select route requires StringSelectMenu interaction");
+    }
+    const selectedValue = interaction.values[0];
+    if (selectedValue === "action:add") {
+      if (adminTargetDiscId !== null) {
+        await replyEphemeral(interaction, route.locale, "commands.personal.memories.admin_action_unavailable");
+        return;
+      }
+      const cachedScope = await loadScope(false);
+      if (cachedScope && cachedScope.privacyLevel === PrivacyLevel.FULL) {
+        await interaction.reply({
+          content: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      const nonce = dependencies.createNonce();
+      await dependencies.showAddModal(interaction, route.locale, route.category, route.lineageId, nonce);
+      return;
+    }
+  }
+
+  if (route.action === "edit-open") {
+    if (!interaction.isButton()) {
+      throw new Error("Personal memories edit-open route requires Button interaction");
+    }
+    const cachedScope = await loadScope(false);
+    if (cachedScope && cachedScope.privacyLevel === PrivacyLevel.FULL) {
+      await interaction.reply({
+        content: localizer(
+          route.locale,
+          cachedScope.admin
+            ? "commands.personal.memories.admin_privacy_blocked"
+            : "commands.personal.memories.privacy_blocked_error_detail",
+        ),
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    if (!cachedScope) {
+      await interaction.reply({
+        content: localizer(route.locale, "commands.personal.memories.unavailable"),
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const memories = await dependencies.loadMemories(cachedScope.userId, route.lineageId);
+    const memory = memories.find((m) => m.personal_memory_id === route.memoryId);
+    if (!memory) {
+      await interaction.deferUpdate();
+      await repaint(
+        interaction,
+        route.locale,
+        cachedScope,
+        route.category,
+        route.lineageId,
+        memories,
+        { kind: "main" },
+        changedStateReceipt(route.locale),
+        dependencies,
+      );
+      return;
+    }
+    const nonce = dependencies.createNonce();
+    await dependencies.showEditModal(
+      interaction,
+      route.locale,
+      route.category,
+      route.lineageId,
+      memory,
+      nonce,
+      scopeRouteContext(cachedScope),
+    );
+    return;
+  }
+
+  const initialScope = await beginPanelInteraction(interaction, {
+    authorize: () => true,
+    onDenied: () => Promise.resolve(),
+    load: () => loadScope(route.action === "retry" || route.action === "refresh"),
+    onMissing: () => interaction.editReply(terminalPayload(route.locale, "commands.personal.memories.unavailable")),
+  });
+  if (!initialScope) return;
+  let scope = initialScope;
+
+  if (route.action === "admin-open") {
+    await repaint(interaction, route.locale, scope, "global", 0, [], { kind: "admin-pick" }, undefined, dependencies);
+    return;
+  }
+
+  if (route.action === "admin-pick") {
+    const targetDiscId = (interaction as UserSelectMenuInteraction).values[0];
+    const adminScope = targetDiscId ? await dependencies.resolveAdminScope(interaction, targetDiscId) : null;
+    if (!adminScope) {
+      const memories = await dependencies.loadMemories(scope.userId, 0);
+      await repaint(
+        interaction,
+        route.locale,
+        scope,
+        "global",
+        0,
+        memories,
+        { kind: "main" },
+        receipt(route.locale, "admin_target_unknown"),
+        dependencies,
+      );
+      return;
+    }
+    log.info(`Bot owner ${interaction.user.id} opened personal memories admin mode for user ${targetDiscId}`);
+    const memories = await dependencies.loadMemories(adminScope.userId, 0);
+    await repaint(
+      interaction,
+      route.locale,
+      adminScope,
+      "global",
+      0,
+      memories,
+      { kind: "main" },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "category") {
+    const lineageId = route.category === "persona" ? (scopeLineageIds(scope)[0] ?? 0) : 0;
+    const memories = await dependencies.loadMemories(scope.userId, lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      lineageId,
+      memories,
+      { kind: "main" },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "persona-select") {
+    const selectedLineage = Number((interaction as StringSelectMenuInteraction).values[0]);
+    const lineageIds = scopeLineageIds(scope);
+    const validLineage = lineageIds.includes(selectedLineage) ? selectedLineage : (lineageIds[0] ?? 0);
+    const memories = await dependencies.loadMemories(scope.userId, validLineage);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      "persona",
+      validLineage,
+      memories,
+      { kind: "main" },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "persona-page") {
+    const lineageIds = scopeLineageIds(scope);
+    const validLineage = lineageIds.includes(route.lineageId) ? route.lineageId : (lineageIds[0] ?? 0);
+    const memories = await dependencies.loadMemories(scope.userId, validLineage);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      "persona",
+      validLineage,
+      memories,
+      { kind: "main", personaRangeIndex: route.rangeIndex },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "select") {
+    const selectedValue = (interaction as StringSelectMenuInteraction).values[0];
+    const memoryId = Number(selectedValue);
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main", selectedMemoryId: memoryId, rangeIndex: route.rangeIndex },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "range-open") {
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main", rangeIndex: 0 },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "range") {
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main", rangeIndex: route.rangeIndex },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "range-page") {
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main", rangeIndex: route.chooserPage },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "range-cancel") {
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main" },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "add-submit") {
+    const modal = interaction as ModalSubmitInteraction;
+    let content = "";
+    try {
+      content = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("content", route.nonce));
+    } catch {
+      // Optional once the file field can supply the memories instead.
+    }
+    let tagsRaw = "";
+    try {
+      tagsRaw = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("tags", route.nonce));
+    } catch {
+      // Field optional
+    }
+    const tags = parsePersonalMemoryTags(tagsRaw);
+    const uploadedFile = dependencies.takeFileUpload(interaction.id, route.nonce);
+
+    if (uploadedFile) {
+      const upload = await dependencies.readUploadedText(uploadedFile);
+      if (!upload.isValid || !upload.text) {
+        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+        await repaint(
+          interaction,
+          route.locale,
+          scope,
+          route.category,
+          route.lineageId,
+          memories,
+          { kind: "main" },
+          receipt(route.locale, upload.error === "file_too_large" ? "batch_file_too_large" : "batch_file_invalid"),
+          dependencies,
+        );
+        return;
+      }
+
+      const uploaded = getNonEmptyNumberedLines(upload.text).map((line) => line.content);
+      const typed = content.trim();
+      const batchAction = await performPanelAction(
+        () =>
+          dependencies.operations.addBatch({
+            userId: scope.userId,
+            userDiscId: scope.userDiscId,
+            personaLineageId: route.lineageId,
+            contents: typed ? [typed, ...uploaded] : uploaded,
+            tags,
+          }),
+        () => loadScope(true),
+      );
+      const batchResult = batchAction.result;
+      scope = batchAction.state ?? scope;
+      const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+
+      if (batchResult.status === "success") {
+        if (scope.internalServerId) {
+          dependencies.recordAction({
+            action: "personal-memories.personal.memory.add",
+            serverId: scope.internalServerId,
+            userDiscId: interaction.user.id,
+          });
+        }
+        await repaint(
+          interaction,
+          route.locale,
+          scope,
+          route.category,
+          route.lineageId,
+          memories,
+          { kind: "main" },
+          receipt(route.locale, "batch_added", {
+            added: batchResult.added,
+            skipped: batchResult.skipped,
+          }),
+          dependencies,
+        );
+        return;
+      }
+
+      const batchReceiptByStatus: Record<string, string> = {
+        "privacy-blocked": "privacy_blocked_error",
+        "empty-content": "empty_content",
+        "content-too-long": "content_too_long",
+        "all-duplicates": "batch_all_duplicates",
+        "batch-limit-reached": "batch_limit_reached",
+        "write-failed": "write_failed",
+      };
+      await repaint(
+        interaction,
+        route.locale,
+        scope,
+        route.category,
+        route.lineageId,
+        memories,
+        { kind: "main" },
+        receipt(route.locale, batchReceiptByStatus[batchResult.status] ?? "write_failed", {
+          max: memoryLimits.maxPersonalMemories,
+          available: batchResult.status === "batch-limit-reached" ? batchResult.available : 0,
+          requested: batchResult.status === "batch-limit-reached" ? batchResult.requested : 0,
+        }),
+        dependencies,
+      );
+      return;
+    }
+
+    const action = await performPanelAction(
+      () =>
+        dependencies.operations.add({
+          userId: scope.userId,
+          userDiscId: scope.userDiscId,
+          personaLineageId: route.lineageId,
+          content,
+          tags,
+        }),
+      () => loadScope(true),
+    );
+    const result = action.result;
+    scope = action.state ?? scope;
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+
+    if (result.status === "success") {
+      if (scope.internalServerId) {
+        dependencies.recordAction({
+          action: "personal-memories.personal.memory.add",
+          serverId: scope.internalServerId,
+          userDiscId: interaction.user.id,
+        });
+      }
+      await repaint(
+        interaction,
+        route.locale,
+        scope,
+        route.category,
+        route.lineageId,
+        memories,
+        { kind: "main", selectedMemoryId: result.row.personal_memory_id },
+        receipt(route.locale, "added", { memory: result.row.content }),
+        dependencies,
+      );
+      return;
+    }
+
+    const receiptByStatus: Record<string, string> = {
+      "privacy-blocked": "privacy_blocked_error",
+      "empty-content": "empty_content",
+      "content-too-long": "content_too_long",
+      "limit-reached": "limit_reached",
+      "write-failed": "write_failed",
+    };
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main" },
+      receipt(route.locale, receiptByStatus[result.status] ?? "write_failed", {
+        max: memoryLimits.maxPersonalMemories,
+      }),
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "edit-submit") {
+    const modal = interaction as ModalSubmitInteraction;
+    const content = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("content", route.nonce));
+    let tagsRaw = "";
+    try {
+      tagsRaw = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("tags", route.nonce));
+    } catch {
+      // Field optional
+    }
+    const tags = parsePersonalMemoryTags(tagsRaw);
+
+    const action = await performPanelAction(
+      () =>
+        dependencies.operations.edit({
+          userId: scope.userId,
+          userDiscId: scope.userDiscId,
+          personaLineageId: route.lineageId,
+          memoryId: route.memoryId,
+          content,
+          tags,
+        }),
+      () => loadScope(true),
+    );
+    const result = action.result;
+    scope = action.state ?? scope;
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+
+    if (result.status === "success") {
+      if (scope.admin) {
+        log.info(
+          `Bot owner ${interaction.user.id} edited personal memory ${route.memoryId} of user ${scope.admin.targetDiscId}`,
+        );
+      }
+      if (scope.internalServerId) {
+        dependencies.recordAction({
+          action: scope.admin
+            ? "personal-memories.personal.admin-memory.edit"
+            : "personal-memories.personal.memory.edit",
+          serverId: scope.internalServerId,
+          userDiscId: interaction.user.id,
+        });
+      }
+      await repaint(
+        interaction,
+        route.locale,
+        scope,
+        route.category,
+        route.lineageId,
+        memories,
+        { kind: "main", selectedMemoryId: result.row.personal_memory_id },
+        receipt(route.locale, "edited", { memory: result.row.content }),
+        dependencies,
+      );
+      return;
+    }
+
+    if (result.status === "unchanged") {
+      await repaint(
+        interaction,
+        route.locale,
+        scope,
+        route.category,
+        route.lineageId,
+        memories,
+        { kind: "main", selectedMemoryId: route.memoryId },
+        noChangesReceipt(route.locale),
+        dependencies,
+      );
+      return;
+    }
+
+    if (result.status === "not-found") {
+      await repaint(
+        interaction,
+        route.locale,
+        scope,
+        route.category,
+        route.lineageId,
+        memories,
+        { kind: "main" },
+        changedStateReceipt(route.locale),
+        dependencies,
+      );
+      return;
+    }
+
+    const receiptByStatus: Record<string, string> = {
+      "privacy-blocked": "privacy_blocked_error",
+      "empty-content": "empty_content",
+      "content-too-long": "content_too_long",
+      "write-failed": "write_failed",
+    };
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main", selectedMemoryId: route.memoryId },
+      receipt(route.locale, receiptByStatus[result.status] ?? "write_failed", {
+        max: memoryLimits.maxPersonalMemories,
+      }),
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "remove-prompt") {
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    const target = memories.find((m) => m.personal_memory_id === route.memoryId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      target ? { kind: "remove", memoryId: route.memoryId } : { kind: "main" },
+      target ? undefined : changedStateReceipt(route.locale),
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "remove-cancel") {
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main", selectedMemoryId: route.memoryId },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "remove-confirm") {
+    const memoriesBeforeRemoval = [...(await dependencies.loadMemories(scope.userId, route.lineageId))];
+    const action = await performPanelAction(
+      () =>
+        dependencies.operations.remove({
+          userId: scope.userId,
+          userDiscId: scope.userDiscId,
+          personaLineageId: route.lineageId,
+          memoryId: route.memoryId,
+        }),
+      () => loadScope(true),
+    );
+    const result = action.result;
+    scope = action.state ?? scope;
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+
+    if (result.status === "success") {
+      if (scope.admin) {
+        log.info(
+          `Bot owner ${interaction.user.id} removed personal memory ${route.memoryId} of user ${scope.admin.targetDiscId}`,
+        );
+      }
+      if (scope.internalServerId) {
+        dependencies.recordAction({
+          action: scope.admin
+            ? "personal-memories.personal.admin-memory.remove"
+            : "personal-memories.personal.memory.remove",
+          serverId: scope.internalServerId,
+          userDiscId: interaction.user.id,
+        });
+      }
+      const rangeIndex =
+        rangeIndexAfterRemoval(
+          memoriesBeforeRemoval,
+          route.memoryId,
+          (memory) => memory.personal_memory_id ?? 0,
+          memories.length,
+          MAX_PERSONAL_MEMORY_PAGE_SIZE,
+        ) ?? 0;
+      await repaint(
+        interaction,
+        route.locale,
+        scope,
+        route.category,
+        route.lineageId,
+        memories,
+        { kind: "main", rangeIndex },
+        receipt(route.locale, "removed", { memory: result.row.content }),
+        dependencies,
+      );
+      return;
+    }
+
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main" },
+      result.status === "not-found" ? changedStateReceipt(route.locale) : receipt(route.locale, "write_failed"),
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "stm-clear") {
+    await dependencies.operations.clearStm(scope.userDiscId);
+    if (scope.internalServerId) {
+      dependencies.recordAction({
+        action: "personal-memories.personal.stm.clear",
+        serverId: scope.internalServerId,
+        userDiscId: interaction.user.id,
+      });
+    }
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main" },
+      receipt(route.locale, "stm_cleared"),
+      dependencies,
+    );
+    return;
+  }
+
+  if (route.action === "retry" || route.action === "refresh") {
+    const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
+    await repaint(
+      interaction,
+      route.locale,
+      scope,
+      route.category,
+      route.lineageId,
+      memories,
+      { kind: "main" },
+      undefined,
+      dependencies,
+    );
+    return;
+  }
+}
 
 export function createPersonalMemoriesInteractionRoute(
   overrides: Partial<PersonalMemoriesRouteDependencies> = {},
@@ -481,617 +1298,32 @@ export function createPersonalMemoriesInteractionRoute(
     async execute(_client, interaction, parsed): Promise<void> {
       const route = parsePersonalMemoriesPanelRoute(parsed);
       if (!route) throw new Error(`Malformed personal memories panel route: ${interaction.customId}`);
+      await executePersonalMemoriesRoute(dependencies, interaction, route, null);
+    },
+  };
+}
 
-      // Modals and modal-opening select choices handle their own acknowledgement
-      if (route.action === "select") {
-        if (!interaction.isStringSelectMenu()) {
-          throw new Error("Personal memories select route requires StringSelectMenu interaction");
-        }
-        const selectedValue = interaction.values[0];
-        if (selectedValue === "action:add") {
-          const cachedScope = await dependencies.resolveScope(interaction, false);
-          if (cachedScope && cachedScope.privacyLevel === PrivacyLevel.FULL) {
-            await interaction.reply({
-              content: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
-              flags: MessageFlags.Ephemeral,
-            });
-            return;
-          }
-          const nonce = dependencies.createNonce();
-          await dependencies.showAddModal(interaction, route.locale, route.category, route.lineageId, nonce);
-          return;
-        }
-      }
+export function createPersonalMemoriesAdminInteractionRoute(
+  overrides: Partial<PersonalMemoriesRouteDependencies> = {},
+): GlobalInteractionRoute {
+  const dependencies: PersonalMemoriesRouteDependencies = {
+    ...defaultDependencies,
+    ...overrides,
+  };
 
-      if (route.action === "edit-open") {
-        if (!interaction.isButton()) {
-          throw new Error("Personal memories edit-open route requires Button interaction");
-        }
-        const cachedScope = await dependencies.resolveScope(interaction, false);
-        if (cachedScope && cachedScope.privacyLevel === PrivacyLevel.FULL) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.personal.memories.privacy_blocked_error_detail"),
-            flags: MessageFlags.Ephemeral,
-          });
-          return;
-        }
-        if (!cachedScope) {
-          await interaction.reply({
-            content: localizer(route.locale, "commands.personal.memories.unavailable"),
-            flags: MessageFlags.Ephemeral,
-          });
-          return;
-        }
-        const memories = await dependencies.loadMemories(cachedScope.userId, route.lineageId);
-        const memory = memories.find((m) => m.personal_memory_id === route.memoryId);
-        if (!memory) {
-          await interaction.deferUpdate();
-          await repaint(
-            interaction,
-            route.locale,
-            cachedScope,
-            route.category,
-            route.lineageId,
-            memories,
-            { kind: "main" },
-            changedStateReceipt(route.locale),
-            dependencies,
-          );
-          return;
-        }
-        const nonce = dependencies.createNonce();
-        await dependencies.showEditModal(interaction, route.locale, route.category, route.lineageId, memory, nonce);
-        return;
-      }
-
-      const initialScope = await beginPanelInteraction(interaction, {
-        authorize: () => true,
-        onDenied: () => Promise.resolve(),
-        load: () => dependencies.resolveScope(interaction, route.action === "retry" || route.action === "refresh"),
-        onMissing: () => interaction.editReply(terminalPayload(route.locale, "commands.personal.memories.unavailable")),
-      });
-      if (!initialScope) return;
-      let scope = initialScope;
-
-      if (route.action === "category") {
-        const lineageId = route.category === "persona" ? (scope.personas[0]?.persona_lineage_id ?? 0) : 0;
-        const memories = await dependencies.loadMemories(scope.userId, lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          lineageId,
-          memories,
-          { kind: "main" },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "persona-select") {
-        const selectedLineage = Number((interaction as StringSelectMenuInteraction).values[0]);
-        const validLineage = scope.personas.some((p) => p.persona_lineage_id === selectedLineage)
-          ? selectedLineage
-          : (scope.personas[0]?.persona_lineage_id ?? 0);
-        const memories = await dependencies.loadMemories(scope.userId, validLineage);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          "persona",
-          validLineage,
-          memories,
-          { kind: "main" },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "persona-page") {
-        const validLineage = scope.personas.some((persona) => persona.persona_lineage_id === route.lineageId)
-          ? route.lineageId
-          : (scope.personas[0]?.persona_lineage_id ?? 0);
-        const memories = await dependencies.loadMemories(scope.userId, validLineage);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          "persona",
-          validLineage,
-          memories,
-          { kind: "main", personaRangeIndex: route.rangeIndex },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "select") {
-        const selectedValue = (interaction as StringSelectMenuInteraction).values[0];
-        const memoryId = Number(selectedValue);
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main", selectedMemoryId: memoryId, rangeIndex: route.rangeIndex },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "range-open") {
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main", rangeIndex: 0 },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "range") {
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main", rangeIndex: route.rangeIndex },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "range-page") {
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main", rangeIndex: route.chooserPage },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "range-cancel") {
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main" },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "add-submit") {
-        const modal = interaction as ModalSubmitInteraction;
-        let content = "";
-        try {
-          content = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("content", route.nonce));
-        } catch {
-          // Optional once the file field can supply the memories instead.
-        }
-        let tagsRaw = "";
-        try {
-          tagsRaw = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("tags", route.nonce));
-        } catch {
-          // Field optional
-        }
-        const tags = parsePersonalMemoryTags(tagsRaw);
-        const uploadedFile = dependencies.takeFileUpload(interaction.id, route.nonce);
-
-        if (uploadedFile) {
-          const upload = await dependencies.readUploadedText(uploadedFile);
-          if (!upload.isValid || !upload.text) {
-            const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-            await repaint(
-              interaction,
-              route.locale,
-              scope,
-              route.category,
-              route.lineageId,
-              memories,
-              { kind: "main" },
-              receipt(route.locale, upload.error === "file_too_large" ? "batch_file_too_large" : "batch_file_invalid"),
-              dependencies,
-            );
-            return;
-          }
-
-          const uploaded = getNonEmptyNumberedLines(upload.text).map((line) => line.content);
-          const typed = content.trim();
-          const batchAction = await performPanelAction(
-            () =>
-              dependencies.operations.addBatch({
-                userId: scope.userId,
-                userDiscId: scope.userDiscId,
-                personaLineageId: route.lineageId,
-                contents: typed ? [typed, ...uploaded] : uploaded,
-                tags,
-              }),
-            () => dependencies.resolveScope(interaction, true),
-          );
-          const batchResult = batchAction.result;
-          scope = batchAction.state ?? scope;
-          const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-
-          if (batchResult.status === "success") {
-            if (scope.internalServerId) {
-              dependencies.recordAction({
-                action: "personal-memories.personal.memory.add",
-                serverId: scope.internalServerId,
-                userDiscId: interaction.user.id,
-              });
-            }
-            await repaint(
-              interaction,
-              route.locale,
-              scope,
-              route.category,
-              route.lineageId,
-              memories,
-              { kind: "main" },
-              receipt(route.locale, "batch_added", {
-                added: batchResult.added,
-                skipped: batchResult.skipped,
-              }),
-              dependencies,
-            );
-            return;
-          }
-
-          const batchReceiptByStatus: Record<string, string> = {
-            "privacy-blocked": "privacy_blocked_error",
-            "empty-content": "empty_content",
-            "content-too-long": "content_too_long",
-            "all-duplicates": "batch_all_duplicates",
-            "batch-limit-reached": "batch_limit_reached",
-            "write-failed": "write_failed",
-          };
-          await repaint(
-            interaction,
-            route.locale,
-            scope,
-            route.category,
-            route.lineageId,
-            memories,
-            { kind: "main" },
-            receipt(route.locale, batchReceiptByStatus[batchResult.status] ?? "write_failed", {
-              max: memoryLimits.maxPersonalMemories,
-              available: batchResult.status === "batch-limit-reached" ? batchResult.available : 0,
-              requested: batchResult.status === "batch-limit-reached" ? batchResult.requested : 0,
-            }),
-            dependencies,
-          );
-          return;
-        }
-
-        const action = await performPanelAction(
-          () =>
-            dependencies.operations.add({
-              userId: scope.userId,
-              userDiscId: scope.userDiscId,
-              personaLineageId: route.lineageId,
-              content,
-              tags,
-            }),
-          () => dependencies.resolveScope(interaction, true),
-        );
-        const result = action.result;
-        scope = action.state ?? scope;
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-
-        if (result.status === "success") {
-          if (scope.internalServerId) {
-            dependencies.recordAction({
-              action: "personal-memories.personal.memory.add",
-              serverId: scope.internalServerId,
-              userDiscId: interaction.user.id,
-            });
-          }
-          await repaint(
-            interaction,
-            route.locale,
-            scope,
-            route.category,
-            route.lineageId,
-            memories,
-            { kind: "main", selectedMemoryId: result.row.personal_memory_id },
-            receipt(route.locale, "added", { memory: result.row.content }),
-            dependencies,
-          );
-          return;
-        }
-
-        const receiptByStatus: Record<string, string> = {
-          "privacy-blocked": "privacy_blocked_error",
-          "empty-content": "empty_content",
-          "content-too-long": "content_too_long",
-          "limit-reached": "limit_reached",
-          "write-failed": "write_failed",
-        };
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main" },
-          receipt(route.locale, receiptByStatus[result.status] ?? "write_failed", {
-            max: memoryLimits.maxPersonalMemories,
-          }),
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "edit-submit") {
-        const modal = interaction as ModalSubmitInteraction;
-        const content = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("content", route.nonce));
-        let tagsRaw = "";
-        try {
-          tagsRaw = modal.fields.getTextInputValue(buildPersonalMemoryModalFieldId("tags", route.nonce));
-        } catch {
-          // Field optional
-        }
-        const tags = parsePersonalMemoryTags(tagsRaw);
-
-        const action = await performPanelAction(
-          () =>
-            dependencies.operations.edit({
-              userId: scope.userId,
-              userDiscId: scope.userDiscId,
-              personaLineageId: route.lineageId,
-              memoryId: route.memoryId,
-              content,
-              tags,
-            }),
-          () => dependencies.resolveScope(interaction, true),
-        );
-        const result = action.result;
-        scope = action.state ?? scope;
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-
-        if (result.status === "success") {
-          if (scope.internalServerId) {
-            dependencies.recordAction({
-              action: "personal-memories.personal.memory.edit",
-              serverId: scope.internalServerId,
-              userDiscId: interaction.user.id,
-            });
-          }
-          await repaint(
-            interaction,
-            route.locale,
-            scope,
-            route.category,
-            route.lineageId,
-            memories,
-            { kind: "main", selectedMemoryId: result.row.personal_memory_id },
-            receipt(route.locale, "edited", { memory: result.row.content }),
-            dependencies,
-          );
-          return;
-        }
-
-        if (result.status === "unchanged") {
-          await repaint(
-            interaction,
-            route.locale,
-            scope,
-            route.category,
-            route.lineageId,
-            memories,
-            { kind: "main", selectedMemoryId: route.memoryId },
-            noChangesReceipt(route.locale),
-            dependencies,
-          );
-          return;
-        }
-
-        if (result.status === "not-found") {
-          await repaint(
-            interaction,
-            route.locale,
-            scope,
-            route.category,
-            route.lineageId,
-            memories,
-            { kind: "main" },
-            changedStateReceipt(route.locale),
-            dependencies,
-          );
-          return;
-        }
-
-        const receiptByStatus: Record<string, string> = {
-          "privacy-blocked": "privacy_blocked_error",
-          "empty-content": "empty_content",
-          "content-too-long": "content_too_long",
-          "write-failed": "write_failed",
-        };
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main", selectedMemoryId: route.memoryId },
-          receipt(route.locale, receiptByStatus[result.status] ?? "write_failed", {
-            max: memoryLimits.maxPersonalMemories,
-          }),
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "remove-prompt") {
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        const target = memories.find((m) => m.personal_memory_id === route.memoryId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          target ? { kind: "remove", memoryId: route.memoryId } : { kind: "main" },
-          target ? undefined : changedStateReceipt(route.locale),
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "remove-cancel") {
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main", selectedMemoryId: route.memoryId },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "remove-confirm") {
-        const memoriesBeforeRemoval = [...(await dependencies.loadMemories(scope.userId, route.lineageId))];
-        const action = await performPanelAction(
-          () =>
-            dependencies.operations.remove({
-              userId: scope.userId,
-              userDiscId: scope.userDiscId,
-              personaLineageId: route.lineageId,
-              memoryId: route.memoryId,
-            }),
-          () => dependencies.resolveScope(interaction, true),
-        );
-        const result = action.result;
-        scope = action.state ?? scope;
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-
-        if (result.status === "success") {
-          if (scope.internalServerId) {
-            dependencies.recordAction({
-              action: "personal-memories.personal.memory.remove",
-              serverId: scope.internalServerId,
-              userDiscId: interaction.user.id,
-            });
-          }
-          const rangeIndex =
-            rangeIndexAfterRemoval(
-              memoriesBeforeRemoval,
-              route.memoryId,
-              (memory) => memory.personal_memory_id ?? 0,
-              memories.length,
-              MAX_PERSONAL_MEMORY_PAGE_SIZE,
-            ) ?? 0;
-          await repaint(
-            interaction,
-            route.locale,
-            scope,
-            route.category,
-            route.lineageId,
-            memories,
-            { kind: "main", rangeIndex },
-            receipt(route.locale, "removed", { memory: result.row.content }),
-            dependencies,
-          );
-          return;
-        }
-
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main" },
-          result.status === "not-found" ? changedStateReceipt(route.locale) : receipt(route.locale, "write_failed"),
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "stm-clear") {
-        await dependencies.operations.clearStm(scope.userDiscId);
-        if (scope.internalServerId) {
-          dependencies.recordAction({
-            action: "personal-memories.personal.stm.clear",
-            serverId: scope.internalServerId,
-            userDiscId: interaction.user.id,
-          });
-        }
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main" },
-          receipt(route.locale, "stm_cleared"),
-          dependencies,
-        );
-        return;
-      }
-
-      if (route.action === "retry" || route.action === "refresh") {
-        const memories = await dependencies.loadMemories(scope.userId, route.lineageId);
-        await repaint(
-          interaction,
-          route.locale,
-          scope,
-          route.category,
-          route.lineageId,
-          memories,
-          { kind: "main" },
-          undefined,
-          dependencies,
-        );
-        return;
-      }
+  return {
+    namespace: PERSONAL_MEMORIES_ADMIN_ROUTE_NAMESPACE,
+    version: PERSONAL_MEMORIES_ADMIN_ROUTE_VERSION,
+    async execute(_client, interaction, parsed): Promise<void> {
+      const adminRoute = parsePersonalMemoriesAdminRoute(parsed);
+      if (!adminRoute) throw new Error(`Malformed personal memories admin route: ${interaction.customId}`);
+      await executePersonalMemoriesRoute(dependencies, interaction, adminRoute.route, adminRoute.targetDiscId);
     },
   };
 }
 
 export const personalMemoriesInteractionRoute = createPersonalMemoriesInteractionRoute();
+export const personalMemoriesAdminInteractionRoute = createPersonalMemoriesAdminInteractionRoute();
 
 export type PersonalMemoriesPanelPayloadOrTerminal =
   | ReturnType<typeof buildPersonalMemoriesPanelPayload>
@@ -1137,6 +1369,7 @@ export async function buildInitialPersonalMemoriesPanel(
       privacyLevel: scope.privacyLevel,
       readStatus: scope.readStatus,
       page: { kind: "main" },
+      canManageMembers: dependencies.isBotOwner(interaction.user.id),
     }),
     selectedPersonaAvatar,
   );

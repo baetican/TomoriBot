@@ -66,6 +66,21 @@ O TomoriBot o tratará como um novo usuário a partir de sua próxima mensagem.`
       persona_memory_count_shared: `{count} memórias, compartilhadas entre {personas} personas`,
       persona_memory_count_one_shared: `1 memória, compartilhada entre {personas} personas`,
       stm_title: `[Memória de Curto Prazo](https://docs.tomoribot.app/pt-BR/features/knowledge/memory/#short-term-memory-stm)`,
+      admin_open_button: "Gerenciar um membro…",
+      admin_pick_title: "Gerenciar as Memórias de um Membro",
+      admin_pick_description:
+        "Somente para o dono do bot. Escolha um membro para editar ou remover as memórias pessoais dele.",
+      admin_pick_placeholder: "Escolha um membro",
+      admin_banner: "Gerenciando as memórias pessoais de **{member}** como dono do bot. Apenas editar e remover.",
+      admin_exit_button: "Voltar para minhas memórias",
+      admin_denied: "Somente um dono do bot pode gerenciar as memórias pessoais de outros membros.",
+      admin_action_unavailable: "Essa ação não está disponível enquanto você gerencia as memórias de outro membro.",
+      admin_privacy_blocked:
+        "O nível de privacidade deste membro está definido como Completo, então as memórias dele não podem ser editadas. Você ainda pode removê-las.",
+      admin_privacy_full_warning:
+        "O nível de privacidade deste membro está definido como Completo. A edição está desativada; a remoção continua funcionando.",
+      admin_target_unknown_heading: "Membro Não Encontrado",
+      admin_target_unknown_detail: "Esse membro nunca usou o bot, então não tem memórias pessoais.",
       stm_active_count: `Resumos ativos sobre você: \`{count}\``,
       stm_clear_button: `Limpar Minha Memória de Curto Prazo`,
       stm_crossserver_hint:

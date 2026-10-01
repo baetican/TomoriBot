@@ -170,6 +170,8 @@ Delete/reset remains type-scoped. Commands that currently require confirmation c
 
 Personal row management is through `/personal memories` (type-scoped by persona/global scope), and server memory management remains type-scoped by persona scope (`/memories`). Both operate on selected stored rows rather than bulk-resetting a whole scope.
 
+Bot owners listed in `BOT_OWNER_IDS` can also open another member's personal memories from the same panel ("Manage a member"). This admin mode can only edit or remove rows; adding memories and clearing STM are refused. Its custom IDs use the separate `pm-admin` namespace and carry the target's snowflake, so the owner check runs again on every interaction instead of trusting the button that produced it. A member at privacy level `FULL` can still have rows removed but not edited. Each admin edit or removal is logged with the owner and target IDs. An unset or blank `BOT_OWNER_IDS` disables admin mode.
+
 Important: the current reset/remove commands do not implement a blanket user-row/account hard delete path in these command implementations.
 
 ## SQL Injection Protections
