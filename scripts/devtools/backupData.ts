@@ -1,7 +1,13 @@
 import { sql } from "bun";
 import { log } from "@/utils/misc/logger";
 import { config } from "dotenv";
-import { resolveBackupsRoot, runDataBackup } from "@/utils/backup/dataBackup";
+import {
+  logPostgresCommandFailureGuidance,
+  resolveBackupsRoot,
+  runDataBackup,
+  runExternalCommand,
+} from "@/utils/backup/dataBackup";
+import { createRestoreDumpStream } from "../lib/restoreDump";
 import { existsSync, copyFileSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -18,22 +24,6 @@ if (mode !== "--backup" && mode !== "--restore") {
   log.info("  bun run restore-backup --latest");
   log.info("  bun run restore-backup --from <bundle-dir>");
   process.exit(1);
-}
-
-async function runExternalCommand(
-  command: string,
-  args: string[],
-  options: { stdout?: "inherit" | "ignore" } = {},
-): Promise<void> {
-  const subprocess = Bun.spawn([command, ...args], {
-    stdout: options.stdout ?? "inherit",
-    stderr: "inherit",
-  });
-
-  const exitCode = await subprocess.exited;
-  if (exitCode !== 0) {
-    throw new Error(`${command} exited with code ${exitCode}`);
-  }
 }
 
 function resolveEnvPath(): string {
@@ -73,8 +63,10 @@ async function runBackup(): Promise<void> {
  *   2. Shows the bundle manifest so the user can verify what they're restoring.
  *   3. Checks whether the target database is non-empty and warns before proceeding.
  *   4. Asks for final confirmation before touching any local files.
- *   5. Overwrites the local .env with config.env from the bundle.
- *   6. Restores the database from database.sql using psql.
+ *   5. Restores the database from database.sql using psql, skipping extension statements
+ *      only the extension owner may run (see createExtensionOwnerFilter).
+ *   6. Overwrites the local .env with config.env from the bundle, only after psql succeeds,
+ *      so a failed restore leaves this machine's connection settings in place for the retry.
  *
  * @param bundlePath - Absolute or relative path to the transfer bundle directory.
  */
@@ -158,10 +150,10 @@ async function runRestore(bundlePath: string): Promise<void> {
 
   log.section("⚠️ WARNING — Read before continuing");
   log.info("Restoring will:");
-  log.info("  1. Overwrite your local .env with the bundled config.env.");
+  log.info("  1. Restore the bundled database dump into your current DB connection.");
+  log.info("  2. If that succeeds, overwrite your local .env with the bundled config.env.");
   log.info("     ➜ After restore, update POSTGRES_HOST/PORT/USER/PASSWORD/DB in your .env");
   log.info("       if this machine's database credentials differ from the source machine.");
-  log.info("  2. Restore the bundled database dump into your current DB connection.");
   let response = "";
   if (restoreConfirmed) {
     log.warn("Non-interactive restore confirmation accepted from TOMORI_RESTORE_CONFIRM.");
@@ -183,6 +175,21 @@ async function runRestore(bundlePath: string): Promise<void> {
     process.exit(0);
   }
 
+  log.info("Restoring database from dump (running psql)...");
+  try {
+    const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+    await runExternalCommand("psql", ["--quiet", "-o", nullDevice, targetDatabaseUrl, "-v", "ON_ERROR_STOP=1"], {
+      stdin: createRestoreDumpStream(dbDumpPath),
+    });
+    log.success("Database restored successfully.");
+  } catch (error) {
+    log.error("psql restore failed.");
+    logPostgresCommandFailureGuidance(error);
+    log.info("psql reads the dump from stdin, so `<stdin>:N` in its output is line N of database.sql.");
+    log.info("Your .env was not changed.");
+    process.exit(1);
+  }
+
   const localEnvPath = resolveEnvPath();
   const envAlreadyExists = existsSync(localEnvPath);
   if (envAlreadyExists) {
@@ -192,28 +199,6 @@ async function runRestore(bundlePath: string): Promise<void> {
   }
   copyFileSync(envBackupPath, localEnvPath);
   log.success(".env restored from bundle.");
-
-  log.info("Restoring database from dump (running psql)...");
-  try {
-    const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
-    await runExternalCommand("psql", [
-      "--quiet",
-      "-o",
-      nullDevice,
-      targetDatabaseUrl,
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-f",
-      dbDumpPath,
-    ]);
-    log.success("Database restored successfully.");
-  } catch (_error) {
-    log.error("psql restore failed. Ensure psql is installed and in your PATH.");
-    log.info("  Windows: install PostgreSQL from https://www.postgresql.org/download/windows/");
-    log.info("  macOS:   brew install postgresql");
-    log.info("  Linux:   sudo apt-get install postgresql-client");
-    process.exit(1);
-  }
 
   log.section("✅ Restore Complete!");
   log.info("Next steps:");

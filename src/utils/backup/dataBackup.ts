@@ -63,14 +63,15 @@ class ExternalCommandError extends Error {
   }
 }
 
-async function runExternalCommand(
+export async function runExternalCommand(
   command: string,
   args: string[],
-  options: { stdout?: "inherit" | "ignore" } = {},
+  options: { stdout?: "inherit" | "ignore"; stdin?: ReadableStream<Uint8Array> } = {},
 ): Promise<void> {
   let subprocess: ReturnType<typeof Bun.spawn>;
   try {
     subprocess = Bun.spawn([command, ...args], {
+      stdin: options.stdin ?? "ignore",
       stdout: options.stdout ?? "inherit",
       stderr: "pipe",
     });
@@ -87,7 +88,8 @@ async function runExternalCommand(
   }
 }
 
-function logPgDumpFailureGuidance(error: unknown): void {
+/** Prints a PostgreSQL client tool's stderr and the most likely fix for it. */
+export function logPostgresCommandFailureGuidance(error: unknown): void {
   if (!(error instanceof ExternalCommandError)) {
     log.info("Check that PostgreSQL client tools are installed and that your database settings are valid.");
     return;
@@ -95,7 +97,7 @@ function logPgDumpFailureGuidance(error: unknown): void {
 
   const stderr = error.stderr.trim();
   if (stderr.length > 0) {
-    log.info("pg_dump output:");
+    log.info(`${error.command} output:`);
     for (const line of stderr.split(/\r?\n/)) {
       log.info(`  ${line}`);
     }
@@ -103,7 +105,9 @@ function logPgDumpFailureGuidance(error: unknown): void {
 
   const normalized = stderr.toLowerCase();
   if (error.exitCode === null) {
-    log.info("pg_dump could not be started. Install PostgreSQL client tools and ensure pg_dump is in PATH.");
+    log.info(
+      `${error.command} could not be started. Install PostgreSQL client tools and ensure ${error.command} is in PATH.`,
+    );
     log.info("  Windows: install PostgreSQL from https://www.postgresql.org/download/windows/");
     log.info("  macOS:   brew install postgresql");
     log.info("  Linux:   sudo apt-get install postgresql-client");
@@ -140,7 +144,22 @@ function logPgDumpFailureGuidance(error: unknown): void {
     return;
   }
 
-  log.info("pg_dump is installed, but PostgreSQL rejected or failed the dump request. Check the pg_dump output above.");
+  if (normalized.includes("permission denied for schema public")) {
+    log.info("The POSTGRES_USER from your .env cannot create objects in the public schema.");
+    log.info("PostgreSQL 15+ only grants that to the database owner. As a PostgreSQL admin, run:");
+    log.info("  ALTER DATABASE <database> OWNER TO <bot_role>;");
+    return;
+  }
+
+  if (normalized.includes("must be owner of")) {
+    log.info("The POSTGRES_USER from your .env does not own an object the command touches.");
+    log.info("Run the command as that object's owner, or make the bot role its owner as a PostgreSQL admin.");
+    return;
+  }
+
+  log.info(
+    `${error.command} is installed, but PostgreSQL rejected or failed the request. Check the ${error.command} output above.`,
+  );
 }
 
 function resolveEnvPath(): string {
@@ -374,7 +393,7 @@ export async function runDataBackup(options: DataBackupOptions = {}): Promise<Da
     log.success("Database dump completed.");
   } catch (error) {
     await log.error("pg_dump failed. No database changes were made.", error);
-    logPgDumpFailureGuidance(error);
+    logPostgresCommandFailureGuidance(error);
     const resolvedBundleDir = resolve(bundleDir);
     if (isPathInside(backupsRoot, resolvedBundleDir) && existsSync(resolvedBundleDir)) {
       rmSync(resolvedBundleDir, { recursive: true, force: true });

@@ -65,6 +65,17 @@ Or restore from a specific bundle:
 bun run restore-backup --from backups/backup_2024-01-15_14-30-45
 ```
 
+The restore runs `psql` as the `POSTGRES_USER` from your `.env`, which on a fresh install is usually not a superuser. Two consequences follow:
+
+- The restore skips the dump's `DROP EXTENSION` and `COMMENT ON EXTENSION` statements, because only the extension's owner may run them and a fresh install's extensions usually belong to the superuser that created them. The dump's `CREATE EXTENSION IF NOT EXISTS` statements still run, so nothing is lost.
+- On PostgreSQL 15 and later, only the database owner can create tables in the `public` schema. If the restore fails with `permission denied for schema public`, make the bot role the database owner as a PostgreSQL admin, then run `bun run nuke-db` and restore again:
+
+  ```bash
+  sudo -u postgres psql -c "ALTER DATABASE <database> OWNER TO <bot_role>;"
+  ```
+
+psql reads the filtered dump from stdin, so an error reported at `<stdin>:687` refers to line 687 of `database.sql`.
+
 ### Automatic local startup backups
 
 In non-production (`RUN_ENV` not set to `production`), TomoriBot also checks for a full data backup before database initialization runs. It creates an automatic `backupData.ts`-compatible bundle when either condition is true:
